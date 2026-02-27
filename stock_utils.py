@@ -52,7 +52,7 @@ def _save_stock_map(stocks: list[dict]) -> None:
 
 
 def _normalize_code(code: str) -> str:
-    """将 600519 / 000001 转为 6 位代码（AkShare/存储用）"""
+    """将 600519 / 000001 转为 6 位代码（存储用）"""
     code = re.sub(r"\s+", "", code).strip()
     if not code:
         return ""
@@ -107,7 +107,7 @@ SINA_REFERER = "https://finance.sina.com.cn/"
 
 
 def _fetch_sina_quotes_sync(sina_codes: list[str]) -> list[dict]:
-    """同步请求新浪行情，仅用 urllib，返回与 akshare 相同结构的 list[dict]"""
+    """同步请求新浪行情，仅用 urllib，返回 list[dict]"""
     if not sina_codes:
         return []
     url = SINA_HQ + ",".join(sina_codes)
@@ -164,79 +164,17 @@ def _fetch_sina_quotes_sync(sina_codes: list[str]) -> list[dict]:
 
 
 def _fetch_akshare_spot_sync():
-    try:
-        import akshare as ak
-
-        return ak.stock_zh_a_spot_em()
-    except ImportError:
-        raise ImportError("未安装 akshare")
+    """已废弃：保留空壳以兼容旧代码，不再实际访问 AkShare。"""
+    raise ImportError("AkShare 功能已禁用")
 
 
 def _fetch_akshare_quotes_sync(codes: list[str]) -> list[dict]:
-    codes_set = set(codes)
-    try:
-        df = _fetch_akshare_spot_sync()
-    except ImportError:
-        raise
-    except Exception as e:
-        logger.warning("AkShare 请求失败: %s", e)
-        return []
-    if df is None or df.empty:
-        return []
-    col_code = "代码" if "代码" in df.columns else df.columns[0]
-    col_name = "名称" if "名称" in df.columns else (df.columns[1] if len(df.columns) > 1 else col_code)
-    col_price = "最新价" if "最新价" in df.columns else (df.columns[2] if len(df.columns) > 2 else None)
-    col_open = "今开" if "今开" in df.columns else None
-    col_pct = "涨跌幅" if "涨跌幅" in df.columns else None
-    col_prev = "昨收" if "昨收" in df.columns else None
-    col_high = "最高" if "最高" in df.columns else None
-    col_low = "最低" if "最低" in df.columns else None
-    if col_price is None:
-        return []
-    result: list[dict] = []
-    for _, row in df.iterrows():
-        try:
-            code_val = str(row[col_code]).strip()
-            code_6 = re.sub(r"\D", "", code_val)[:6].zfill(6)
-            if code_6 not in codes_set and code_val not in codes_set:
-                continue
-            name = str(row.get(col_name, code_val))
-            curr = float(row[col_price])
-            prev = float(row[col_prev]) if col_prev and str(row.get(col_prev, "")) not in ("", "nan") else curr
-            pct = (
-                float(row[col_pct])
-                if col_pct and str(row.get(col_pct, "")) not in ("", "nan")
-                else ((curr - prev) / prev * 100 if prev else 0)
-            )
-            change = curr - prev
-            result.append(
-                {
-                    "code": code_6,
-                    "name": name or code_6,
-                    "current": curr,
-                    "open": float(row[col_open])
-                    if col_open and str(row.get(col_open, "")) not in ("", "nan")
-                    else prev,
-                    "prev_close": prev,
-                    "change": change,
-                    "change_pct": pct,
-                    "high": float(row[col_high])
-                    if col_high and str(row.get(col_high, "")) not in ("", "nan")
-                    else curr,
-                    "low": float(row[col_low])
-                    if col_low and str(row.get(col_low, "")) not in ("", "nan")
-                    else curr,
-                }
-            )
-        except (ValueError, TypeError, KeyError):
-            continue
-    order = {c: i for i, c in enumerate(codes)}
-    result.sort(key=lambda x: (order.get(x["code"], 999), x["code"]))
-    return result
+    """已废弃：不再通过 AkShare 获取行情。"""
+    raise ImportError("AkShare 功能已禁用")
 
 
 def _search_code_by_name_sync(keyword: str, max_results: int = 5) -> list[dict]:
-    """通过本地缓存 + AkShare 按名称模糊搜索股票代码（同步，给查询/添加等用）"""
+    """通过本地缓存按名称模糊搜索股票代码（同步，给查询/添加等用）"""
     keyword = (keyword or "").strip()
     if not keyword:
         return []
@@ -254,41 +192,8 @@ def _search_code_by_name_sync(keyword: str, max_results: int = 5) -> list[dict]:
         if hits:
             return hits
 
-    try:
-        import akshare as ak  # noqa: F401
-    except ImportError:
-        return []
-    try:
-        df = _fetch_akshare_spot_sync()
-    except Exception:
-        try:
-            import akshare as ak
-
-            df = ak.stock_zh_a_spot_em()
-        except Exception:
-            return []
-    if df is None or df.empty or "名称" not in df.columns or "代码" not in df.columns:
-        return []
-
-    all_stocks: list[dict] = []
-    for _, row in df.iterrows():
-        code_val = str(row["代码"]).strip()
-        code_6 = re.sub(r"\D", "", code_val)[:6].zfill(6)
-        if not code_6:
-            continue
-        name = str(row["名称"]).strip()
-        all_stocks.append({"code": code_6, "name": name or code_6})
-    if all_stocks:
-        _save_stock_map(all_stocks)
-
-    hits2: list[dict] = []
-    for s in all_stocks:
-        name = s["name"]
-        if keyword in name:
-            hits2.append(s)
-            if len(hits2) >= max_results:
-                break
-    return hits2
+    # 不再从 AkShare 拉取全市场列表，若本地无缓存则直接返回空结果
+    return []
 
 
 async def _search_code_by_name(keyword: str, max_results: int = 5) -> list[dict]:
@@ -296,23 +201,14 @@ async def _search_code_by_name(keyword: str, max_results: int = 5) -> list[dict]
 
 
 async def _fetch_quotes(codes: list[str]) -> list[dict]:
-    """统一入口：先试 AkShare，失败则用新浪备用。"""
+    """统一入口：仅使用新浪行情源获取报价。"""
     if not codes:
         return []
     codes = list(dict.fromkeys(codes))
-    try:
-        result = await asyncio.to_thread(_fetch_akshare_quotes_sync, codes)
-        if result:
-            return result
-    except ImportError:
-        logger.debug("AkShare 未安装，使用新浪备用")
-    except Exception as e:
-        logger.warning("AkShare 失败，改用新浪: %s", e)
     sina_codes = [_to_sina_code(c) for c in codes if _to_sina_code(c)]
     if not sina_codes:
         return []
-    result = await asyncio.to_thread(_fetch_sina_quotes_sync, sina_codes)
-    return result
+    return await asyncio.to_thread(_fetch_sina_quotes_sync, sina_codes)
 
 
 def _format_quotes(quotes: list[dict], title: str = "行情") -> str:
@@ -347,7 +243,7 @@ class StockModule:
         self.config = config
         self._scheduler = None
         self._start_scheduler()
-        logger.info("股票模块初始化完成（AkShare 优先，新浪备用）")
+        logger.info("股票模块初始化完成（使用新浪行情，无 AkShare 依赖）")
 
     def _start_scheduler(self):
         try:
