@@ -1,0 +1,17 @@
+name: "astrbot_all_char"
+desc: "char 系列插件整合版：火车票 / 智能定时任务 / 股票 / 天气 / Epic 免费游戏 / 今日运势 / 记账（命令模式优先）"
+version: "0.1.0"
+author: "char"
+
+display_name: "astrbot_all_char"
+astrbot_version: ">=4.16,<5"
+support_platforms:
+  - telegram
+  - discord
+  - wecom
+  - qq_official
+  - dingtalk
+  - lark
+  - line
+  - satori
+

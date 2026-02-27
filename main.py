@@ -98,7 +98,11 @@ class AllCharPlugin(Star):
     # ---------------- 天气 ----------------
 
     @filter.command("nyweather", alias={"天气", "天气查询", "查天气"})
-    async def cmd_weather(self, event: AstrMessageEvent):
+    async def cmd_weather(self, event: AstrMessageEvent | None = None):
+        # 兼容 AstrBot 对 handler 参数检查的同时，避免因为参数注入异常导致直接抛 TypeError
+        if event is None:
+            logger.error("cmd_weather 被调用时缺少 event 参数")
+            return
         async for result in handle_weather_command(event, self.config):
             yield result
 
