@@ -1,0 +1,786 @@
+import asyncio
+import json
+import re
+import urllib.request
+from pathlib import Path
+
+from astrbot.api import AstrBotConfig, logger
+from astrbot.api.event import AstrMessageEvent, MessageChain
+from astrbot.api.message_components import At
+from astrbot.api.star import Context, StarTools
+
+
+def _data_dir():
+    try:
+        return StarTools.get_data_dir("astrbot_stock")
+    except Exception:
+        return Path("data", "plugins_data", "astrbot_stock")
+
+
+def _watchlist_file():
+    _data_dir().mkdir(parents=True, exist_ok=True)
+    return _data_dir() / "watchlist.json"
+
+
+def _stock_map_file():
+    _data_dir().mkdir(parents=True, exist_ok=True)
+    return _data_dir() / "stock_codes.json"
+
+
+def _load_stock_map() -> list[dict]:
+    path = _stock_map_file()
+    if not path.exists():
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and "stocks" in data:
+            return data["stocks"]
+        if isinstance(data, list):
+            return data
+    except Exception as e:
+        logger.error("加载股票代码表失败: %s", e)
+    return []
+
+
+def _save_stock_map(stocks: list[dict]) -> None:
+    try:
+        with open(_stock_map_file(), "w", encoding="utf-8") as f:
+            json.dump({"stocks": stocks}, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error("保存股票代码表失败: %s", e)
+
+
+def _normalize_code(code: str) -> str:
+    """将 600519 / 000001 转为 6 位代码（AkShare/存储用）"""
+    code = re.sub(r"\s+", "", code).strip()
+    if not code:
+        return ""
+    code_upper = code.upper()
+    if code_upper.startswith(("SH", "SZ")):
+        num = re.sub(r"\D", "", code)[:6].zfill(6)
+    else:
+        num = re.sub(r"\D", "", code)[:6].zfill(6)
+    if len(num) < 5:
+        return ""
+    if num[0] == "6":
+        return num
+    if num[0] in "03":
+        return num
+    return ""
+
+
+def _to_sina_code(six_digit: str) -> str:
+    """6 位代码转新浪格式：sh600519 / sz000001"""
+    if not six_digit or len(six_digit) < 5:
+        return ""
+    n = six_digit[:6].zfill(6)
+    if n[0] == "6":
+        return "sh" + n
+    if n[0] in "03":
+        return "sz" + n
+    return ""
+
+
+def _load_watchlist() -> dict:
+    path = _watchlist_file()
+    if not path.exists():
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error("加载自选数据失败: %s", e)
+        return {}
+
+
+def _save_watchlist(data: dict) -> None:
+    try:
+        with open(_watchlist_file(), "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error("保存自选数据失败: %s", e)
+
+
+SINA_HQ = "https://hq.sinajs.cn/list="
+SINA_REFERER = "https://finance.sina.com.cn/"
+
+
+def _fetch_sina_quotes_sync(sina_codes: list[str]) -> list[dict]:
+    """同步请求新浪行情，仅用 urllib，返回与 akshare 相同结构的 list[dict]"""
+    if not sina_codes:
+        return []
+    url = SINA_HQ + ",".join(sina_codes)
+    result: list[dict] = []
+    try:
+        req = urllib.request.Request(url, headers={"Referer": SINA_REFERER})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            raw = resp.read().decode("gbk", errors="replace")
+    except Exception as e:
+        logger.warning("新浪行情请求失败: %s", e)
+        return []
+    for line in raw.split("\n"):
+        line = line.strip()
+        if "var hq_str_" not in line or "=" not in line:
+            continue
+        try:
+            i = line.index("=")
+            code_key = line[line.index("var hq_str_") + 10 : i].strip()
+            rest = line[i + 1 :].strip().strip('";')
+            if rest.startswith('"'):
+                rest = rest[1:]
+            if rest.endswith('";'):
+                rest = rest[:-2]
+            parts = rest.split(",")
+            if len(parts) < 4:
+                continue
+            name = parts[0].strip()
+            try:
+                open_price = float(parts[1]) if len(parts) > 1 and parts[1] else 0.0
+                prev = float(parts[2])
+                curr = float(parts[3])
+            except (ValueError, IndexError):
+                continue
+            change = curr - prev if prev else 0
+            pct = (change / prev * 100) if prev else 0
+            code_6 = re.sub(r"\D", "", code_key)[:6].zfill(6)
+            result.append(
+                {
+                    "code": code_6,
+                    "name": name or code_6,
+                    "current": curr,
+                    "open": open_price or prev,
+                    "prev_close": prev,
+                    "change": change,
+                    "change_pct": pct,
+                    "high": float(parts[4]) if len(parts) > 4 else curr,
+                    "low": float(parts[5]) if len(parts) > 5 else curr,
+                }
+            )
+        except Exception as e:
+            logger.debug("新浪解析行失败: %s", e)
+            continue
+    return result
+
+
+def _fetch_akshare_spot_sync():
+    try:
+        import akshare as ak
+
+        return ak.stock_zh_a_spot_em()
+    except ImportError:
+        raise ImportError("未安装 akshare")
+
+
+def _fetch_akshare_quotes_sync(codes: list[str]) -> list[dict]:
+    codes_set = set(codes)
+    try:
+        df = _fetch_akshare_spot_sync()
+    except ImportError:
+        raise
+    except Exception as e:
+        logger.warning("AkShare 请求失败: %s", e)
+        return []
+    if df is None or df.empty:
+        return []
+    col_code = "代码" if "代码" in df.columns else df.columns[0]
+    col_name = "名称" if "名称" in df.columns else (df.columns[1] if len(df.columns) > 1 else col_code)
+    col_price = "最新价" if "最新价" in df.columns else (df.columns[2] if len(df.columns) > 2 else None)
+    col_open = "今开" if "今开" in df.columns else None
+    col_pct = "涨跌幅" if "涨跌幅" in df.columns else None
+    col_prev = "昨收" if "昨收" in df.columns else None
+    col_high = "最高" if "最高" in df.columns else None
+    col_low = "最低" if "最低" in df.columns else None
+    if col_price is None:
+        return []
+    result: list[dict] = []
+    for _, row in df.iterrows():
+        try:
+            code_val = str(row[col_code]).strip()
+            code_6 = re.sub(r"\D", "", code_val)[:6].zfill(6)
+            if code_6 not in codes_set and code_val not in codes_set:
+                continue
+            name = str(row.get(col_name, code_val))
+            curr = float(row[col_price])
+            prev = float(row[col_prev]) if col_prev and str(row.get(col_prev, "")) not in ("", "nan") else curr
+            pct = (
+                float(row[col_pct])
+                if col_pct and str(row.get(col_pct, "")) not in ("", "nan")
+                else ((curr - prev) / prev * 100 if prev else 0)
+            )
+            change = curr - prev
+            result.append(
+                {
+                    "code": code_6,
+                    "name": name or code_6,
+                    "current": curr,
+                    "open": float(row[col_open])
+                    if col_open and str(row.get(col_open, "")) not in ("", "nan")
+                    else prev,
+                    "prev_close": prev,
+                    "change": change,
+                    "change_pct": pct,
+                    "high": float(row[col_high])
+                    if col_high and str(row.get(col_high, "")) not in ("", "nan")
+                    else curr,
+                    "low": float(row[col_low])
+                    if col_low and str(row.get(col_low, "")) not in ("", "nan")
+                    else curr,
+                }
+            )
+        except (ValueError, TypeError, KeyError):
+            continue
+    order = {c: i for i, c in enumerate(codes)}
+    result.sort(key=lambda x: (order.get(x["code"], 999), x["code"]))
+    return result
+
+
+def _search_code_by_name_sync(keyword: str, max_results: int = 5) -> list[dict]:
+    """通过本地缓存 + AkShare 按名称模糊搜索股票代码（同步，给查询/添加等用）"""
+    keyword = (keyword or "").strip()
+    if not keyword:
+        return []
+
+    local_stocks = _load_stock_map()
+    if local_stocks:
+        hits: list[dict] = []
+        for s in local_stocks:
+            name = str(s.get("name", "")).strip()
+            code = str(s.get("code", "")).strip()
+            if keyword in name and code:
+                hits.append({"code": code, "name": name or code})
+                if len(hits) >= max_results:
+                    break
+        if hits:
+            return hits
+
+    try:
+        import akshare as ak  # noqa: F401
+    except ImportError:
+        return []
+    try:
+        df = _fetch_akshare_spot_sync()
+    except Exception:
+        try:
+            import akshare as ak
+
+            df = ak.stock_zh_a_spot_em()
+        except Exception:
+            return []
+    if df is None or df.empty or "名称" not in df.columns or "代码" not in df.columns:
+        return []
+
+    all_stocks: list[dict] = []
+    for _, row in df.iterrows():
+        code_val = str(row["代码"]).strip()
+        code_6 = re.sub(r"\D", "", code_val)[:6].zfill(6)
+        if not code_6:
+            continue
+        name = str(row["名称"]).strip()
+        all_stocks.append({"code": code_6, "name": name or code_6})
+    if all_stocks:
+        _save_stock_map(all_stocks)
+
+    hits2: list[dict] = []
+    for s in all_stocks:
+        name = s["name"]
+        if keyword in name:
+            hits2.append(s)
+            if len(hits2) >= max_results:
+                break
+    return hits2
+
+
+async def _search_code_by_name(keyword: str, max_results: int = 5) -> list[dict]:
+    return await asyncio.to_thread(_search_code_by_name_sync, keyword, max_results)
+
+
+async def _fetch_quotes(codes: list[str]) -> list[dict]:
+    """统一入口：先试 AkShare，失败则用新浪备用。"""
+    if not codes:
+        return []
+    codes = list(dict.fromkeys(codes))
+    try:
+        result = await asyncio.to_thread(_fetch_akshare_quotes_sync, codes)
+        if result:
+            return result
+    except ImportError:
+        logger.debug("AkShare 未安装，使用新浪备用")
+    except Exception as e:
+        logger.warning("AkShare 失败，改用新浪: %s", e)
+    sina_codes = [_to_sina_code(c) for c in codes if _to_sina_code(c)]
+    if not sina_codes:
+        return []
+    result = await asyncio.to_thread(_fetch_sina_quotes_sync, sina_codes)
+    return result
+
+
+def _format_quotes(quotes: list[dict], title: str = "行情") -> str:
+    if not quotes:
+        return "暂无行情数据。"
+    lines = [f"📈 {title}\n"]
+    for q in quotes:
+        sign = "▲" if q["change"] >= 0 else "▼"
+        pct = q["change_pct"]
+        change = q.get("change", 0.0)
+        open_price = q.get("open")
+        prev = q.get("prev_close")
+        high = q.get("high")
+        low = q.get("low")
+        lines.append(f"{q['name']}({q['code']})")
+        lines.append(f"  当前：{q['current']:.2f} 元（{sign}{abs(pct):.2f}% {change:+.2f}）")
+        if open_price is not None and prev is not None:
+            lines.append(f"  今开 / 昨收：{open_price:.2f} / {prev:.2f}")
+        elif prev is not None:
+            lines.append(f"  昨收：{prev:.2f}")
+        if high is not None and low is not None:
+            lines.append(f"  最高 / 最低：{high:.2f} / {low:.2f}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+class StockModule:
+    """封装原股票插件逻辑（仅命令与定时，不含自然语言识别）。"""
+
+    def __init__(self, context: Context, config: AstrBotConfig):
+        self.context = context
+        self.config = config
+        self._scheduler = None
+        self._start_scheduler()
+        logger.info("股票模块初始化完成（AkShare 优先，新浪备用）")
+
+    def _start_scheduler(self):
+        try:
+            from apscheduler.schedulers.asyncio import AsyncIOScheduler
+            from apscheduler.triggers.cron import CronTrigger
+
+            tz = getattr(self.config, "stock_reminder_timezone", "Asia/Shanghai")
+            self._scheduler = AsyncIOScheduler(timezone=tz)
+            self._scheduler.add_job(
+                self._run_reminders,
+                CronTrigger(minute="*", timezone=tz),
+                id="stock_reminder_minute",
+            )
+            self._scheduler.start()
+            logger.info("股票定时提醒已启动")
+        except ImportError:
+            logger.warning("未安装 apscheduler，定时提醒不可用")
+        except Exception as e:
+            logger.error("股票定时任务启动失败: %s", e)
+
+    async def _run_reminders(self):
+        from datetime import datetime
+
+        data = _load_watchlist()
+        now = datetime.now()
+        current_time = now.strftime("%H:%M")
+        to_remove: list[tuple[str, str]] = []
+        for session_id, rec in data.items():
+            stocks = rec.get("stocks") or []
+            reminders = rec.get("reminders") or []
+            if not stocks or not reminders:
+                continue
+            mention_creators: dict[str, str | None] = {}
+            for r in reminders:
+                if r.get("time") != current_time:
+                    continue
+                if r.get("repeat") == "once":
+                    to_remove.append((session_id, r.get("time")))
+                creator_id = r.get("creator_id")
+                creator_name = r.get("creator_name")
+                if creator_id:
+                    if creator_id not in mention_creators:
+                        mention_creators[creator_id] = creator_name
+                quotes = await _fetch_quotes(stocks)
+                if not quotes:
+                    continue
+                text = _format_quotes(quotes, "自选股定时提醒")
+                try:
+                    chain = MessageChain()
+                    for cid, cname in mention_creators.items():
+                        try:
+                            if cname:
+                                chain.chain.append(At(qq=cid, name=cname))
+                            else:
+                                chain.chain.append(At(qq=cid))
+                        except Exception:
+                            continue
+                    chain.message(text)
+                    await self.context.send_message(session_id, chain)
+                except Exception as e:
+                    logger.error("定时推送到 %s 失败: %s", session_id[:50], e)
+        for session_id, time_str in to_remove:
+            rec = data.get(session_id)
+            if not rec:
+                continue
+            rec["reminders"] = [x for x in (rec.get("reminders") or []) if x.get("time") != time_str]
+            data[session_id] = rec
+        if to_remove:
+            _save_watchlist(data)
+
+        price_alert_removed = False
+        for session_id, rec in list(data.items()):
+            alerts = rec.get("price_alerts") or []
+            if not alerts:
+                continue
+            codes = list(dict.fromkeys([a.get("code") for a in alerts if a.get("code")]))
+            if not codes:
+                continue
+            quotes = await _fetch_quotes(codes)
+            if not quotes:
+                continue
+            quote_map = {q["code"]: q for q in quotes}
+            to_remove_alerts = []
+            for a in alerts:
+                code = a.get("code")
+                target = a.get("target_price")
+                cond = a.get("condition", "below")
+                creator_id = a.get("creator_id")
+                creator_name = a.get("creator_name")
+                if code is None or target is None:
+                    continue
+                q = quote_map.get(code)
+                if not q:
+                    continue
+                curr = q["current"]
+                triggered = False
+                if cond == "below" and curr <= target:
+                    triggered = True
+                elif cond == "above" and curr >= target:
+                    triggered = True
+                if not triggered:
+                    continue
+                to_remove_alerts.append(a)
+                text = (
+                    f"🔔 价格提醒\n{q['name']}({code}) 当前 {curr:.2f} 元，"
+                    f"{'已跌破' if cond == 'below' else '已涨破'}您设置的 {target} 元提醒线。"
+                )
+                try:
+                    chain = MessageChain()
+                    if creator_id:
+                        try:
+                            if creator_name:
+                                chain.chain.append(At(qq=creator_id, name=creator_name))
+                            else:
+                                chain.chain.append(At(qq=creator_id))
+                        except Exception:
+                            pass
+                    chain.message(text)
+                    await self.context.send_message(session_id, chain)
+                except Exception as e:
+                    logger.error("价格提醒推送到 %s 失败: %s", session_id[:50], e)
+            for a in to_remove_alerts:
+                rec["price_alerts"].remove(a)
+                price_alert_removed = True
+        if price_alert_removed:
+            _save_watchlist(data)
+
+    def _session_data(self, session_id: str) -> dict:
+        data = _load_watchlist()
+        if session_id not in data:
+            data[session_id] = {"stocks": [], "reminders": [], "price_alerts": []}
+        rec = data[session_id]
+        if "price_alerts" not in rec:
+            rec["price_alerts"] = []
+        return rec
+
+    async def handle_command(self, event: AstrMessageEvent):
+        msg = event.get_message_str().strip()
+        parts = msg.split()
+        if len(parts) < 2:
+            async for r in self._send_help(event):
+                yield r
+            return
+        cmd, args = parts[1].strip().lower(), parts[2:] if len(parts) > 2 else []
+        session_id = getattr(event, "unified_msg_origin", None) or getattr(event, "session_id", "")
+        if not session_id:
+            yield event.plain_result("❌ 无法获取当前会话。")
+            return
+
+        creator_id: str | None = None
+        creator_name: str | None = None
+        try:
+            if hasattr(event, "get_sender_id"):
+                creator_id = event.get_sender_id()
+            if hasattr(event, "get_sender_name"):
+                creator_name = event.get_sender_name()
+        except Exception:
+            creator_id = creator_id or None
+            creator_name = creator_name or None
+
+        if cmd in ("添加", "add"):
+            if not args:
+                yield event.plain_result("用法：/股票 添加 代码，如 /股票 添加 600519")
+                return
+            code = _normalize_code(args[0])
+            if not code:
+                yield event.plain_result("❌ 无效股票代码。")
+                return
+            rec = self._session_data(session_id)
+            if code in rec["stocks"]:
+                yield event.plain_result(f"✅ {code} 已在自选中。")
+                return
+            rec["stocks"].append(code)
+            data = _load_watchlist()
+            data[session_id] = rec
+            _save_watchlist(data)
+            yield event.plain_result(f"✅ 已添加自选：{code}")
+
+        elif cmd in ("删除", "移除", "remove", "del"):
+            if not args:
+                yield event.plain_result("用法：/股票 删除 代码")
+                return
+            code = _normalize_code(args[0])
+            rec = self._session_data(session_id)
+            if code in rec["stocks"]:
+                rec["stocks"].remove(code)
+                data = _load_watchlist()
+                data[session_id] = rec
+                _save_watchlist(data)
+                yield event.plain_result(f"✅ 已移除：{code}")
+            else:
+                yield event.plain_result(f"❌ 自选无 {code}")
+
+        elif cmd in ("列表", "list", "ls"):
+            rec = self._session_data(session_id)
+            if not rec["stocks"]:
+                yield event.plain_result("当前暂无自选，使用 /股票 添加 代码 添加。")
+                return
+            quotes = await _fetch_quotes(rec["stocks"])
+            yield event.plain_result(_format_quotes(quotes, "自选股列表"))
+
+        elif cmd in ("查询", "查", "query", "q"):
+            codes: list[str] = []
+            name_keywords: list[str] = []
+            if args:
+                for a in args:
+                    code = _normalize_code(a)
+                    if code:
+                        codes.append(code)
+                    else:
+                        name_keywords.append(a.strip())
+                if name_keywords:
+                    if len(name_keywords) > 1:
+                        yield event.plain_result("一次仅支持按一个名称关键字查询，请改用：/股票 查询 股票名 或 代码。")
+                        return
+                    kw = name_keywords[0]
+                    matches = await _search_code_by_name(kw, max_results=5)
+                    if not matches:
+                        yield event.plain_result(f"未找到名称包含「{kw}」的股票，请改用代码试试。")
+                        return
+                    if len(matches) > 1:
+                        lines = ["找到多只匹配的股票，请改用代码查询："]
+                        for m in matches:
+                            lines.append(f"  • {m['name']}（{m['code']}）")
+                        yield event.plain_result("\n".join(lines))
+                        return
+                    codes.append(matches[0]["code"])
+            else:
+                rec = self._session_data(session_id)
+                codes = (rec.get("stocks") or [])[:20]
+            if not codes:
+                yield event.plain_result("请指定代码或先添加自选，如：/股票 查询 600519 或 /股票 查询 贵州茅台")
+                return
+            quotes = await _fetch_quotes(codes)
+            yield event.plain_result(_format_quotes(quotes, "行情"))
+
+        elif cmd in ("提醒", "定时", "remind"):
+            if not args:
+                yield event.plain_result("用法：/股票 提醒 09:30 或 /股票 提醒 09:30 一次")
+                return
+            time_str = args[0].strip().replace("：", ":")
+            if not re.match(r"^\d{1,2}:\d{2}$", time_str):
+                yield event.plain_result("时间格式请用 09:30")
+                return
+            repeat = "once" if len(args) > 1 and args[1] in ("一次", "once") else "daily"
+            rec = self._session_data(session_id)
+            reminders = rec.get("reminders") or []
+            if any(r.get("time") == time_str for r in reminders):
+                yield event.plain_result(f"✅ 已有 {time_str} 的提醒。")
+                return
+            reminders.append(
+                {
+                    "time": time_str,
+                    "repeat": repeat,
+                    "creator_id": creator_id,
+                    "creator_name": creator_name,
+                }
+            )
+            rec["reminders"] = reminders
+            data = _load_watchlist()
+            data[session_id] = rec
+            _save_watchlist(data)
+            yield event.plain_result(f"✅ 已设置 {time_str} 定时提醒（{'每天' if repeat == 'daily' else '仅一次'}）")
+
+        elif cmd in ("提醒列表", "remindlist"):
+            rec = self._session_data(session_id)
+            reminders = rec.get("reminders") or []
+            if not reminders:
+                yield event.plain_result("当前未设置定时提醒。")
+                return
+            lines = ["⏰ 定时提醒："]
+            for r in reminders:
+                lines.append(f"  • {r.get('time', '')}（{'每天' if r.get('repeat') == 'daily' else '一次'}）")
+            yield event.plain_result("\n".join(lines))
+
+        elif cmd in ("取消提醒", "cancelremind"):
+            if not args:
+                yield event.plain_result("用法：/股票 取消提醒 09:30")
+                return
+            time_str = args[0].strip()
+            rec = self._session_data(session_id)
+            reminders = rec.get("reminders") or []
+            new_reminders = [r for r in reminders if r.get("time") != time_str]
+            if len(new_reminders) == len(reminders):
+                yield event.plain_result(f"未找到 {time_str} 的提醒。")
+                return
+            rec["reminders"] = new_reminders
+            data = _load_watchlist()
+            data[session_id] = rec
+            _save_watchlist(data)
+            yield event.plain_result(f"✅ 已取消 {time_str} 的提醒。")
+
+        elif cmd in ("跌到", "提醒跌", "跌价提醒"):
+            if len(args) < 2:
+                yield event.plain_result("用法：/股票 跌到 代码 价格 — 如 /股票 跌到 600519 1800")
+                return
+            code = _normalize_code(args[0])
+            if not code:
+                yield event.plain_result("❌ 无效股票代码。")
+                return
+            try:
+                price = float(args[1].replace(",", ""))
+            except ValueError:
+                yield event.plain_result("❌ 价格请填数字，如 1800 或 18.5")
+                return
+            if price <= 0:
+                yield event.plain_result("❌ 价格须大于 0。")
+                return
+            rec = self._session_data(session_id)
+            alerts = rec.get("price_alerts") or []
+            if any(a.get("code") == code and a.get("condition") == "below" for a in alerts):
+                yield event.plain_result(f"✅ 已有 {code} 的跌价提醒，请先取消再设。")
+                return
+            alerts.append(
+                {
+                    "code": code,
+                    "target_price": price,
+                    "condition": "below",
+                    "creator_id": creator_id,
+                    "creator_name": creator_name,
+                }
+            )
+            rec["price_alerts"] = alerts
+            data = _load_watchlist()
+            data[session_id] = rec
+            _save_watchlist(data)
+            yield event.plain_result(f"✅ 已设置：{code} 跌到 {price} 元时提醒。")
+
+        elif cmd in ("涨到", "提醒涨", "涨价提醒"):
+            if len(args) < 2:
+                yield event.plain_result("用法：/股票 涨到 代码 价格 — 如 /股票 涨到 600519 2000")
+                return
+            code = _normalize_code(args[0])
+            if not code:
+                yield event.plain_result("❌ 无效股票代码。")
+                return
+            try:
+                price = float(args[1].replace(",", ""))
+            except ValueError:
+                yield event.plain_result("❌ 价格请填数字。")
+                return
+            if price <= 0:
+                yield event.plain_result("❌ 价格须大于 0。")
+                return
+            rec = self._session_data(session_id)
+            alerts = rec.get("price_alerts") or []
+            if any(a.get("code") == code and a.get("condition") == "above" for a in alerts):
+                yield event.plain_result(f"✅ 已有 {code} 的涨价提醒，请先取消再设。")
+                return
+            alerts.append(
+                {
+                    "code": code,
+                    "target_price": price,
+                    "condition": "above",
+                    "creator_id": creator_id,
+                    "creator_name": creator_name,
+                }
+            )
+            rec["price_alerts"] = alerts
+            data = _load_watchlist()
+            data[session_id] = rec
+            _save_watchlist(data)
+            yield event.plain_result(f"✅ 已设置：{code} 涨到 {price} 元时提醒。")
+
+        elif cmd in ("价格提醒列表", "跌价列表", "涨价列表"):
+            rec = self._session_data(session_id)
+            alerts = rec.get("price_alerts") or []
+            if not alerts:
+                yield event.plain_result("当前未设置价格提醒。")
+                return
+            lines = ["🔔 价格提醒列表："]
+            for a in alerts:
+                cond = "跌到" if a.get("condition") == "below" else "涨到"
+                lines.append(f"  • {a.get('code', '')} {cond} {a.get('target_price', '')} 元")
+            yield event.plain_result("\n".join(lines))
+
+        elif cmd in ("取消价格提醒", "取消跌价", "取消涨价"):
+            if not args:
+                yield event.plain_result("用法：/股票 取消价格提醒 代码")
+                return
+            code = _normalize_code(args[0])
+            rec = self._session_data(session_id)
+            alerts = rec.get("price_alerts") or []
+            new_alerts = [a for a in alerts if a.get("code") != code]
+            if len(new_alerts) == len(alerts):
+                yield event.plain_result(f"未找到 {code} 的价格提醒。")
+                return
+            rec["price_alerts"] = new_alerts
+            data = _load_watchlist()
+            data[session_id] = rec
+            _save_watchlist(data)
+            yield event.plain_result(f"✅ 已取消 {code} 的价格提醒。")
+
+        elif cmd in ("帮助", "help", "?"):
+            async for r in self._send_help(event):
+                yield r
+        else:
+            async for r in self._send_help(event):
+                yield r
+
+    async def _send_help(self, event: AstrMessageEvent):
+        help_text = (
+            "📈 股票插件 — 发送 /股票 或 /股票 帮助 可随时查看本说明\n\n"
+            "【自选与行情】\n"
+            "• /股票 添加 代码 — 添加自选\n"
+            "• /股票 删除 代码 — 移除自选\n"
+            "• /股票 列表 — 自选行情\n"
+            "• /股票 查询 [代码…] — 查行情\n"
+            "• /股票 提醒 09:30 [每天|一次] — 定时提醒\n"
+            "• /股票 提醒列表 — 查看定时提醒\n"
+            "• /股票 取消提醒 09:30 — 取消定时提醒\n\n"
+            "【价格提醒】跌到/涨到某价时通知\n"
+            "• /股票 跌到 代码 价格 — 跌到该价时提醒（如 /股票 跌到 600519 1800）\n"
+            "• /股票 涨到 代码 价格 — 涨到该价时提醒\n"
+            "• /股票 价格提醒列表 — 查看价格提醒\n"
+            "• /股票 取消价格提醒 代码 — 取消该股价格提醒"
+        )
+        yield event.plain_result(help_text)
+
+
+_stock_module: StockModule | None = None
+
+
+def init_stock_module(context: Context, config: AstrBotConfig) -> StockModule:
+    global _stock_module
+    if _stock_module is None:
+        _stock_module = StockModule(context, config)
+    return _stock_module
+
+
+async def handle_stock_command(event: AstrMessageEvent, context: Context, config: AstrBotConfig):
+    module = init_stock_module(context, config)
+    async for r in module.handle_command(event):
+        yield r
+
+

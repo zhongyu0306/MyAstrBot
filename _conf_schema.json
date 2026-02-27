@@ -1,0 +1,274 @@
+{
+  "train_api_url": {
+    "description": "[火车票] 火车票查询 API 地址（来源：astrbot_plugin_train）",
+    "type": "string",
+    "hint": "完整 URL，例如：https://api.lolimi.cn/API/hc/api",
+    "default": "https://api.lolimi.cn/API/hc/api"
+  },
+  "train_default_format": {
+    "description": "[火车票] 默认返回格式",
+    "type": "string",
+    "options": ["text", "image"],
+    "hint": "text=纯文本，image=表格图片（来源：astrbot_plugin_train）",
+    "default": "text"
+  },
+  "train_enable_natural": {
+    "description": "[火车票] 启用自然语言识别",
+    "type": "bool",
+    "hint": "开启后可直接说「从厦门到上海的车票」等自动查询（来源：astrbot_plugin_train）",
+    "default": true
+  },
+
+  "sy_unique_session": {
+    "description": "[定时任务] 启用会话隔离（来源：astrbot_plugin_sy）",
+    "type": "bool",
+    "hint": "启用后，在群组或频道中，每个人的提醒和任务都是独立的，不互相影响。",
+    "obvious_hint": true,
+    "default": false
+  },
+  "sy_wechat_platforms": {
+    "description": "[定时任务] 微信 Platform 名列表",
+    "type": "list",
+    "hint": "消息平台接入的微信平台名，注意不是机器人名称。",
+    "obvious_hint": true,
+    "default": ["gewechat", "wechatpadpro", "wecom"]
+  },
+  "sy_whitelist": {
+    "description": "[定时任务] 用户白名单",
+    "type": "string",
+    "hint": "只允许白名单中的用户使用本模块功能；留空表示不限制。多个用户 ID 用逗号分隔。",
+    "obvious_hint": true,
+    "default": ""
+  },
+  "sy_enable_context": {
+    "description": "[定时任务] 启用上下文功能",
+    "type": "bool",
+    "hint": "启用后，提醒和任务执行时会使用用户的对话上下文，让 AI 生成更自然的回复。",
+    "obvious_hint": true,
+    "default": true
+  },
+  "sy_context_prompts": {
+    "description": "[定时任务] 关闭上下文时的提示词模板",
+    "type": "text",
+    "hint": "当禁用上下文功能时，用于生成提醒的提示词模板，可使用 {user_name}、{reminder_text} 等占位符。",
+    "obvious_hint": false,
+    "default": "你需要提醒用户\"{reminder_text}\"。\n请以自然、友好的方式表达这个提醒，可以参考这种表达方式：\n- 嘿，{user_name}！这是你设置的提醒：{reminder_text}\n- 提醒时间到了！{reminder_text}\n- 别忘了：{reminder_text}\n\n根据提醒的内容，调整你的表达，使其听起来自然且贴心。直接输出你要发送的提醒内容，无需说明这是提醒。",
+    "editor_mode": true,
+    "editor_language": "text"
+  },
+  "sy_max_context_count": {
+    "description": "[定时任务] 最大上下文数量",
+    "type": "int",
+    "hint": "启用上下文功能时，最多使用用户最近多少条对话作为上下文。建议 3–10。",
+    "obvious_hint": false,
+    "slider": {
+      "min": 1,
+      "max": 20,
+      "step": 1
+    },
+    "default": 5
+  },
+  "sy_enable_reminder_at": {
+    "description": "[定时任务] 启用提醒 @ 功能",
+    "type": "bool",
+    "hint": "启用后，提醒执行时会在群聊中 @ 提醒创建者。",
+    "obvious_hint": true,
+    "default": true
+  },
+  "sy_enable_task_at": {
+    "description": "[定时任务] 启用任务 @ 功能",
+    "type": "bool",
+    "hint": "启用后，任务执行时会在群聊中 @ 任务创建者。",
+    "obvious_hint": true,
+    "default": true
+  },
+  "sy_enable_command_at": {
+    "description": "[定时任务] 启用指令任务 @ 功能",
+    "type": "bool",
+    "hint": "启用后，指令任务执行时会在群聊中 @ 任务创建者。",
+    "obvious_hint": true,
+    "default": false
+  },
+  "sy_hide_command_identifier": {
+    "description": "[定时任务] 隐藏指令任务标识",
+    "type": "bool",
+    "hint": "启用后，指令任务执行时只显示自定义文本，不显示方括号和指令详情。",
+    "obvious_hint": true,
+    "default": false
+  },
+  "sy_custom_command_prefix": {
+    "description": "[定时任务] 自定义命令符号",
+    "type": "string",
+    "hint": "自定义指令任务中命令的识别符号，默认 '/'，也可以改为 '!'、'#' 等。",
+    "obvious_hint": true,
+    "default": "/"
+  },
+  "sy_max_reminders_per_user": {
+    "description": "[定时任务] 每个用户最大提醒数量",
+    "type": "int",
+    "hint": "限制每个用户能创建的提醒和任务总数；0 表示不限制。建议 10–30。",
+    "obvious_hint": true,
+    "slider": {
+      "min": 0,
+      "max": 100,
+      "step": 1
+    },
+    "default": 15
+  },
+  "sy_max_command_wait_time": {
+    "description": "[定时任务] 指令任务最大等待时间（秒）",
+    "type": "int",
+    "hint": "指令任务执行时等待响应的最大时间，指令执行较慢时可适当增大。",
+    "obvious_hint": true,
+    "slider": {
+      "min": 5,
+      "max": 300,
+      "step": 5
+    },
+    "default": 20
+  },
+  "sy_inactive_timeout_hours": {
+    "description": "[定时任务] 不活跃自动清理（小时）",
+    "type": "int",
+    "hint": "用户超过指定小时数没有与 Bot 互动，则自动删除该用户的所有提醒和任务。0 表示不限制。",
+    "obvious_hint": true,
+    "slider": {
+      "min": 0,
+      "max": 24 * 14,
+      "step": 1
+    },
+    "default": 0
+  },
+
+  "stock_reminder_timezone": {
+    "description": "[股票] 定时提醒使用的时区（来源：astrbot_plugin_stock）",
+    "type": "string",
+    "hint": "例如 Asia/Shanghai",
+    "default": "Asia/Shanghai"
+  },
+
+  "weather_api_url": {
+    "description": "[天气] 天气查询 API 地址（来源：astrbot_plugin_nyweather_char）",
+    "type": "string",
+    "hint": "天气查询 API 的完整 URL 地址",
+    "default": "https://api.nycnm.cn/API/weather.php"
+  },
+  "weather_api_key": {
+    "description": "[天气] API 密钥",
+    "type": "string",
+    "hint": "访问天气 API 所需的密钥（如有需要）",
+    "default": ""
+  },
+  "weather_default_format": {
+    "description": "[天气] 默认返回格式",
+    "type": "string",
+    "options": ["text", "image"],
+    "hint": "API 返回数据的格式，可选值：text、image（来源：astrbot_plugin_nyweather_char）",
+    "default": "image"
+  },
+  "weather_enable_natural": {
+    "description": "[天气] 启用自然语言识别",
+    "type": "bool",
+    "hint": "开启后可直接说「北京天气」「上海今天多少度」等自动查天气。",
+    "default": true
+  },
+
+  "epic_api_url": {
+    "description": "[Epic] Epic 免费游戏 API 地址（来源：astrbot_plugin_Epicfell_char）",
+    "type": "string",
+    "hint": "默认 FAPI(lolimi)，可改为其他兼容接口",
+    "default": "https://api.lolimi.cn/API/EpicGames"
+  },
+  "epic_api_type": {
+    "description": "[Epic] 接口返回类型参数",
+    "type": "string",
+    "options": ["json", "img"],
+    "hint": "FAPI 必填 type：json=数据，img=图片",
+    "default": "json"
+  },
+  "epic_api_key": {
+    "description": "[Epic] API 密钥（可选）",
+    "type": "string",
+    "hint": "若接口需要则填写，FAPI 部分接口无需密钥",
+    "default": ""
+  },
+  "epic_enable_natural": {
+    "description": "[Epic] 启用自然语言识别",
+    "type": "bool",
+    "hint": "开启后可直接说「Epic 免费游戏」「喜加一」「白嫖游戏」等自动查询。",
+    "default": true
+  },
+  "epic_enable_timer": {
+    "description": "[Epic] 启用定时推送",
+    "type": "bool",
+    "hint": "到点向已订阅的群/用户推送 Epic 免费游戏列表。",
+    "default": false
+  },
+  "epic_timer_cron": {
+    "description": "[Epic] 定时 cron 表达式",
+    "type": "string",
+    "hint": "五段式：分 时 日 月 周，例如 0 12 * * * 表示每天 12:00",
+    "default": "0 12 * * *"
+  },
+  "epic_timer_timezone": {
+    "description": "[Epic] 定时任务时区",
+    "type": "string",
+    "hint": "例如 Asia/Shanghai",
+    "default": "Asia/Shanghai"
+  },
+  "epic_target_sessions": {
+    "description": "[Epic] 固定推送会话 ID 列表（可选）",
+    "type": "list",
+    "hint": "填写要接收定时推送的 unified_msg_origin，与「订阅」效果叠加。",
+    "default": []
+  },
+
+  "jrys_keyword_enabled": {
+    "description": "[今日运势] 启用关键词触发（来源：astrbot_plugin_jrys）",
+    "type": "bool",
+    "hint": "开启后输入 jrys / 今日运势 / 运势 均可触发今日运势查询。",
+    "default": true
+  },
+  "jrys_holiday_rates_enabled": {
+    "description": "[今日运势] 启用节假日爆率调整",
+    "type": "bool",
+    "hint": "开启后在指定节假日会提高“好运”权重。",
+    "default": true
+  },
+  "jrys_fixed_daily_fortune": {
+    "description": "[今日运势] 固定当日运势",
+    "type": "bool",
+    "hint": "开启后同一用户在同一天多次查询时运势结果保持一致。",
+    "default": true
+  },
+  "jrys_holidays": {
+    "description": "[今日运势] 节假日日期列表",
+    "type": "list",
+    "hint": "用于节假日爆率调整的日期列表，格式 MM-DD，例如 02-14。",
+    "default": ["01-01", "02-14", "05-01", "10-01", "12-25"]
+  },
+  "jrys_avatar_cache_expiration": {
+    "description": "[今日运势] 头像缓存过期时间（秒）",
+    "type": "int",
+    "hint": "头像本地缓存的有效期，默认 86400 秒（一天）。",
+    "slider": {
+      "min": 3600,
+      "max": 604800,
+      "step": 3600
+    },
+    "default": 86400
+  },
+  "jrys_pre_cache_background_images": {
+    "description": "[今日运势] 预缓存背景图片",
+    "type": "bool",
+    "hint": "开启后插件加载时预先下载背景图到本地缓存。",
+    "default": false
+  },
+  "jrys_cleanup_background_downloads": {
+    "description": "[今日运势] 清理按需下载的背景图",
+    "type": "bool",
+    "hint": "关闭后背景图始终缓存在 data/plugin_data 目录中，不做临时清理。",
+    "default": true
+  }
+}
+
