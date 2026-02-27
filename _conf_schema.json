@@ -134,7 +134,7 @@
     "obvious_hint": true,
     "slider": {
       "min": 0,
-      "max": 24 * 14,
+      "max": 336,
       "step": 1
     },
     "default": 0
