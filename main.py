@@ -18,12 +18,18 @@ from .bookkeeping_utils import (
     handle_bookkeeping_delete,
 )
 from .jrys_utils import handle_jrys_command, handle_jrys_last_command
+from .ocr_utils import handle_ocr_command
+from .qianfan_search_utils import (
+    handle_smart_search_command,
+    handle_web_search_command,
+)
+from .config_utils import ensure_flat_config
 
 
 @register(
     "astrbot_all_char",
     "char",
-    "char 系列插件整合版：火车票 / 智能定时任务 / 股票 / 天气 / Epic 免费游戏（命令模式优先）",
+    "char 系列插件整合版：火车票 / 智能定时任务 / 股票 / 天气 / Epic 免费游戏 / OCR 识别图片（命令模式优先）",
     "0.1.0",
 )
 class AllCharPlugin(Star):
@@ -39,7 +45,7 @@ class AllCharPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.context = context
-        self.config = config
+        self.config = ensure_flat_config(config)
         logger.info("astrbot_all_char 插件初始化完成（命令模式优先）")
 
     # ---------------- 火车票 ----------------
@@ -123,6 +129,13 @@ class AllCharPlugin(Star):
         async for result in handle_epic_help(event):
             yield result
 
+    # ---------------- OCR 图片识别 ----------------
+
+    @filter.command("识别图片", alias={"ocr", "图片识别"})
+    async def cmd_ocr(self, event: AstrMessageEvent):
+        async for result in handle_ocr_command(event, self.config):
+            yield result
+
     # ---------------- 记账 ----------------
 
     @filter.command("记账支出")
@@ -175,5 +188,23 @@ class AllCharPlugin(Star):
     @filter.command("jrys_last")
     async def cmd_jrys_last(self, event: AstrMessageEvent):
         async for result in handle_jrys_last_command(event, self.context, self.config):
+            yield result
+
+    # ---------------- 百度千帆智能搜索 / 网页搜索 ----------------
+
+    @filter.command("智能搜索", alias={"智能搜素"})
+    async def cmd_smart_search(self, event: AstrMessageEvent):
+        """
+        /智能搜索 <问题>：千帆智能搜索后由当前 LLM 整理输出。每日限 100 次。
+        """
+        async for result in handle_smart_search_command(event, self.context, self.config):
+            yield result
+
+    @filter.command("搜索")
+    async def cmd_web_search(self, event: AstrMessageEvent):
+        """
+        /搜索 <关键词>：千帆网页搜索后由当前 LLM 整理输出。每日限 1000 次。
+        """
+        async for result in handle_web_search_command(event, self.context, self.config):
             yield result
 

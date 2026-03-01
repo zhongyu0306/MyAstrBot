@@ -242,6 +242,7 @@ class StockModule:
         self.context = context
         self.config = config
         self._scheduler = None
+        self._last_reminder_tick: str | None = None
         self._start_scheduler()
         logger.info("股票模块初始化完成（使用新浪行情，无 AkShare 依赖）")
 
@@ -267,9 +268,15 @@ class StockModule:
     async def _run_reminders(self):
         from datetime import datetime
 
-        data = _load_watchlist()
         now = datetime.now()
         current_time = now.strftime("%H:%M")
+        minute_key = now.strftime("%Y-%m-%d %H:%M")
+        # 防止在同一分钟内被调度多次，导致重复推送
+        if self._last_reminder_tick == minute_key:
+            return
+        self._last_reminder_tick = minute_key
+
+        data = _load_watchlist()
         to_remove: list[tuple[str, str]] = []
         for session_id, rec in data.items():
             stocks = rec.get("stocks") or []
