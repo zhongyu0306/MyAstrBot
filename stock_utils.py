@@ -372,10 +372,40 @@ class StockModule:
                 if not triggered:
                     continue
                 to_remove_alerts.append(a)
-                text = (
+                base_text = (
                     f"🔔 价格提醒\n{q['name']}({code}) 当前 {curr:.2f} 元，"
                     f"{'已跌破' if cond == 'below' else '已涨破'}您设置的 {target} 元提醒线。"
                 )
+
+                # 默认使用固定文案，作为 LLM 不可用时的兜底
+                final_text = base_text
+
+                # 尝试交给当前会话的 LLM，用该会话激活人格的口吻重新表述价格提醒
+                try:
+                    provider_id = await self.context.get_current_chat_provider_id(
+                        umo=session_id
+                    )
+                    if provider_id:
+                        prompt = (
+                            "你是当前会话里的聊天角色，请用你平时的人格和说话风格，"
+                            "把下面这条股票价格提醒说给对方听。\n"
+                            "要求：\n"
+                            "1. 只回复一到两句话，简短自然，像朋友在群里/私聊里提醒。\n"
+                            "2. 必须保留核心信息：股票名称、代码、当前价格、触发方向（涨破/跌破）和目标价格。\n"
+                            "3. 不要改变数字含义，不要添加新的投资建议或风险提示。\n"
+                            "4. 不要解释自己是系统或机器人，只当普通人说话。\n"
+                            f"原始提醒文案：{base_text}"
+                        )
+                        llm_resp = await self.context.llm_generate(
+                            chat_provider_id=provider_id,
+                            prompt=prompt,
+                        )
+                        out = (getattr(llm_resp, "completion_text", None) or "").strip()
+                        if out:
+                            final_text = out
+                except Exception as e:
+                    logger.exception("价格提醒生成自然语言文本失败: %s", e)
+
                 try:
                     chain = MessageChain()
                     if creator_id:
@@ -386,7 +416,7 @@ class StockModule:
                                 chain.chain.append(At(qq=creator_id))
                         except Exception:
                             pass
-                    chain.message(text)
+                    chain.message(final_text)
                     await self.context.send_message(session_id, chain)
                 except Exception as e:
                     logger.error("价格提醒推送到 %s 失败: %s", session_id[:50], e)

@@ -208,7 +208,33 @@ class _SimpleReminderCenter:
                 chain.chain.append(At(qq=int(creator_id), name=creator_name or None))
             except Exception:
                 pass
-        chain.message(f"⏰ 提醒：{text}")
+        # 默认文案（兜底）
+        final_text = f"⏰ 提醒：{text}"
+
+        # 尝试交给当前会话的 LLM 用人格口吻润色提醒文案
+        try:
+            provider_id = await self.context.get_current_chat_provider_id(umo=session_id)
+            if provider_id:
+                prompt = (
+                    "你是当前会话里的聊天角色，请用你平时的人格和说话风格，"
+                    "把下面这条提醒内容说给对方听。\n"
+                    "要求：\n"
+                    "1. 只回复一句话，简短自然，像正常人群聊提醒。\n"
+                    "2. 必须包含提醒的核心内容，不要改变时间或事项含义。\n"
+                    "3. 不要解释你在执行系统提醒，也不要说明自己是机器人或助手。\n"
+                    f"需要提醒的内容是：{text}"
+                )
+                llm_resp = await self.context.llm_generate(
+                    chat_provider_id=provider_id,
+                    prompt=prompt,
+                )
+                out = (getattr(llm_resp, "completion_text", None) or "").strip()
+                if out:
+                    final_text = out
+        except Exception as e:
+            logger.exception("定时提醒生成自然语言文本失败: %s", e)
+
+        chain.message(final_text)
         try:
             await self.context.send_message(session_id, chain)
         except Exception as e:
