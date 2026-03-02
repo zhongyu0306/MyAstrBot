@@ -161,9 +161,9 @@
         "default": "https://api.nycnm.cn/API/weather.php"
       },
       "weather_api_key": {
-        "description": "API 密钥",
+        "description": "API 密钥（apikey）",
         "type": "string",
-        "hint": "访问天气 API 所需的密钥（如有需要）",
+        "hint": "使用 api.nycnm.cn 时必填，否则接口返回空。在 API 在线调试页获取并粘贴到此处。",
         "default": ""
       },
       "weather_default_format": {
@@ -359,6 +359,74 @@
         "editor_mode": true,
         "editor_language": "text",
         "default": "请严格以当前设定的人格与口吻整理以下智能搜索结果。使用正常中文标点，避免大量星号（*）或 Markdown 符号。直接输出整理后的回答，不要编造内容。\n\n原始结果：\n{smart_search_result}"
+      }
+    }
+  },
+  "natural_language": {
+    "description": "自然语言触发",
+    "hint": "在保留全部指令的前提下，对「非 / 开头」的消息做意图匹配并复用对应功能；命中后终止后续 LLM，避免重复回复。",
+    "type": "object",
+    "items": {
+      "nl_enabled": {
+        "description": "启用自然语言触发",
+        "type": "bool",
+        "hint": "关闭后仅响应 / 指令，不解析自然语言；不想用自然语言时关掉此项即可。",
+        "obvious_hint": true,
+        "default": true
+      },
+      "nl_weather_enabled": {
+        "description": "天气自然语言",
+        "type": "bool",
+        "hint": "如：北京天气、上海今天多少度",
+        "default": true
+      },
+      "nl_train_enabled": {
+        "description": "火车票自然语言",
+        "type": "bool",
+        "hint": "如：从厦门到上海的车票",
+        "default": true
+      },
+      "nl_reminder_enabled": {
+        "description": "提醒自然语言",
+        "type": "bool",
+        "hint": "如：3分钟后提醒我喝水",
+        "default": true
+      },
+      "nl_stock_enabled": {
+        "description": "股票自然语言",
+        "type": "bool",
+        "hint": "如：贵州茅台股价、我的自选股",
+        "default": true
+      },
+      "nl_epic_enabled": {
+        "description": "Epic 自然语言",
+        "type": "bool",
+        "hint": "如：喜加一、Epic免费游戏",
+        "default": true
+      },
+      "nl_jrys_enabled": {
+        "description": "今日运势自然语言",
+        "type": "bool",
+        "hint": "如：今日运势、运势",
+        "default": true
+      },
+      "nl_smart_search_enabled": {
+        "description": "智能搜索自然语言",
+        "type": "bool",
+        "hint": "如：帮我查一下 xxx、智能搜索 xxx",
+        "default": true
+      },
+      "nl_web_search_enabled": {
+        "description": "网页搜索自然语言",
+        "type": "bool",
+        "hint": "如：搜索 关键词、搜一下 xxx",
+        "default": true
+      },
+      "nl_bookkeeping_enabled": {
+        "description": "记账自然语言",
+        "type": "bool",
+        "hint": "如：支出 20 咖啡、今天花了多少",
+        "default": true
       }
     }
   }

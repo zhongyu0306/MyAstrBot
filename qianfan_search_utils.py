@@ -25,7 +25,7 @@ PLUGIN_DATA_DIR = "astrbot_all_char"
 COUNT_FILE_NAME = "qianfan_search_daily.json"
 _COUNT_FILE_LOCK = asyncio.Lock()
 
-# 千帆 ai_search 接口（鉴权：Authorization: Bearer <API Key>，仅需 API Key）
+# 千帆 ai_search 接口（鉴权：X-Appbuilder-Authorization: Bearer <API Key>，仅需 API Key）
 CHAT_COMPLETIONS_URL = "https://qianfan.baidubce.com/v2/ai_search/chat/completions"
 WEB_SEARCH_URL = "https://qianfan.baidubce.com/v2/ai_search/web_search"
 
@@ -232,10 +232,10 @@ async def _increment_daily_count(which: str) -> int:
 
 
 async def _call_smart_search(api_key: str, query: str) -> str | None:
-    """调用千帆智能搜索 chat/completions，返回模型回复文本。鉴权：Bearer <API Key>。"""
+    """调用千帆智能搜索 chat/completions，返回模型回复文本。鉴权：X-Appbuilder-Authorization: Bearer <API Key>。"""
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}",
+        "X-Appbuilder-Authorization": f"Bearer {api_key}",
     }
     body = {
         "messages": [{"role": "user", "content": query}],

@@ -2,6 +2,7 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
 
+from .natural_language_utils import try_natural_language
 from .train_utils import handle_train_command, handle_train_help
 from .sy_scheduler_utils import handle_sy_rmd_group, handle_simple_reminder
 from .stock_utils import handle_stock_command
@@ -109,6 +110,7 @@ class AllCharPlugin(Star):
         if event is None:
             logger.error("cmd_weather 被调用时缺少 event 参数")
             return
+        event.stop_event()  # 避免同一消息再走自然语言导致回复两次
         async for result in handle_weather_command(event, self.config):
             yield result
 
@@ -206,5 +208,80 @@ class AllCharPlugin(Star):
         /搜索 <关键词>：千帆网页搜索后由当前 LLM 整理输出。每日限 1000 次。
         """
         async for result in handle_web_search_command(event, self.context, self.config):
+            yield result
+
+    # ---------------- 自然语言触发（非 / 开头消息，命中则终止后续 LLM） ----------------
+    # 使用 priority=-10，确保在命令处理器（默认 0）之后执行，避免「/天气 武汉」同时命中命令与 NL 导致回复两次
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=-10)
+    async def on_natural_language(self, event: AstrMessageEvent):
+        """
+        对未命中任何指令的消息尝试自然语言匹配；命中则复用对应 handler 并终止事件传播，避免 LLM 重复回复。
+        指令全部保留，自然语言为增量能力。
+        """
+        raw = (event.get_message_str() or "").strip()
+        if not raw:
+            return
+        # 有 / 或 ／ 开头的统一不走自然语言，只走命令（优先用消息链首段判断，避免适配器已去掉 / 时误走 NL）
+        def _has_command_prefix(ev) -> bool:
+            def _check(s):
+                return isinstance(s, str) and (s.strip().startswith("/") or s.strip().startswith("／"))
+            if _check(ev.get_message_str() or ""):
+                return True
+            for name in ("raw_message", "message", "message_str", "text", "_message"):
+                try:
+                    if _check(getattr(ev, name, None) or ""):
+                        return True
+                except Exception:
+                    pass
+            try:
+                # 消息链首段：部分适配器会把整条消息放在首段，可据此判断是否以 / 开头
+                msg_obj = getattr(ev, "message_obj", None)
+                if msg_obj:
+                    chain = getattr(msg_obj, "message", None) or []
+                    for seg in chain:
+                        t = getattr(seg, "text", None)
+                        if t is None and hasattr(seg, "data"):
+                            d = getattr(seg, "data", None)
+                            t = (d.get("text") or d.get("content") or "") if isinstance(d, dict) else ""
+                        if isinstance(t, str) and t:
+                            if _check(t):
+                                return True
+                            break  # 只检查首段文本
+            except Exception:
+                pass
+            try:
+                for m in (getattr(ev, "get_messages", lambda: None)() or []):
+                    d = getattr(m, "data", None) or {}
+                    t = d.get("text") or d.get("content") or "" if isinstance(d, dict) else ""
+                    if _check(t):
+                        return True
+            except Exception:
+                pass
+            return False
+        if _has_command_prefix(event):
+            return
+        logger.info("[astrbot_all_char] on_natural_language 收到: len=%d is_cmd=%s", len(raw), raw.startswith("/") or raw.startswith("／"))
+        first = True
+        async for result in try_natural_language(
+            event,
+            self.context,
+            self.config,
+            handle_weather_command=handle_weather_command,
+            handle_train_command=handle_train_command,
+            handle_simple_reminder=handle_simple_reminder,
+            handle_stock_command=handle_stock_command,
+            handle_epic_command=handle_epic_command,
+            handle_jrys_command=handle_jrys_command,
+            handle_smart_search_command=handle_smart_search_command,
+            handle_web_search_command=handle_web_search_command,
+            handle_bookkeeping_expense=handle_bookkeeping_expense,
+            handle_bookkeeping_income=handle_bookkeeping_income,
+            handle_bookkeeping_summary=handle_bookkeeping_summary,
+            handle_bookkeeping_daily=handle_bookkeeping_daily,
+            handle_bookkeeping_monthly=handle_bookkeeping_monthly,
+        ):
+            if first:
+                event.stop_event()
+                first = False
             yield result
 
