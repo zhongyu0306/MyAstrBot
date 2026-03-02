@@ -1,10 +1,10 @@
-name: "astrbot_plugin_char_all"
-desc: "多功能生活助手（char 合集） 是对原 char 系列多个热门插件的整合版，一套插件搞定日常查询、提醒、记账、搜素等高频需求，统一配置、统一指令、统一维护。"
+name: "astrbot_plugin_char"
+desc: "多功能生活助手（char 合集），对原 char 系列多个热门插件进行整合，一套插件搞定日常查询、提醒、记账、搜索等高频需求，统一配置、统一指令、统一维护。"
 repo: "https://github.com/zhongyu0306/MyAstrBot"
 version: "0.1.0"
 author: "char"
 
-display_name: "astrbot_all_char"
+display_name: "多功能生活助手"
 astrbot_version: ">=4.16,<5"
 support_platforms:
   - telegram
