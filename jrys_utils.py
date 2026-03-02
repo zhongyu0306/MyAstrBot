@@ -19,7 +19,7 @@ import aiofiles.os
 import aiohttp
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent
-from astrbot.api.star import Context
+from astrbot.api.star import Context, StarTools
 from PIL import Image, ImageDraw, ImageFont
 
 
@@ -269,12 +269,8 @@ class ResourceManager:
             return
 
         try:
-            from astrbot.core.utils.astrbot_path import get_astrbot_data_path
-
-            plugin_name = getattr(self, "name", None) or "unknown"
-            data_root = get_astrbot_data_path()
-            data_root_path = data_root if isinstance(data_root, Path) else Path(str(data_root))
-            plugin_data_dir = data_root_path / "plugin_data" / plugin_name
+            plugin_name = getattr(self, "name", None) or "astrbot_all_char_jrys"
+            plugin_data_dir = StarTools.get_data_dir(plugin_name)
             plugin_data_dir.mkdir(parents=True, exist_ok=True)
 
             self._plugin_data_dir = plugin_data_dir

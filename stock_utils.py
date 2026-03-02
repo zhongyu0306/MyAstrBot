@@ -1,8 +1,9 @@
 import asyncio
 import json
 import re
-import urllib.request
 from pathlib import Path
+
+import aiohttp
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
@@ -106,19 +107,27 @@ SINA_HQ = "https://hq.sinajs.cn/list="
 SINA_REFERER = "https://finance.sina.com.cn/"
 
 
-def _fetch_sina_quotes_sync(sina_codes: list[str]) -> list[dict]:
-    """同步请求新浪行情，仅用 urllib，返回 list[dict]"""
+async def _fetch_sina_quotes(sina_codes: list[str]) -> list[dict]:
+    """异步请求新浪行情，使用 aiohttp，返回 list[dict]。"""
     if not sina_codes:
         return []
     url = SINA_HQ + ",".join(sina_codes)
     result: list[dict] = []
     try:
-        req = urllib.request.Request(url, headers={"Referer": SINA_REFERER})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            raw = resp.read().decode("gbk", errors="replace")
-    except Exception as e:
-        logger.warning("新浪行情请求失败: %s", e)
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, headers={"Referer": SINA_REFERER}) as resp:
+                if resp.status != 200:
+                    logger.warning("新浪行情请求失败，HTTP %s", resp.status)
+                    return []
+                raw = await resp.text(encoding="gbk", errors="replace")
+    except asyncio.TimeoutError:
+        logger.warning("新浪行情请求超时")
         return []
+    except Exception as e:
+        logger.warning("新浪行情请求异常: %s", e)
+        return []
+
     for line in raw.split("\n"):
         line = line.strip()
         if "var hq_str_" not in line or "=" not in line:
@@ -208,7 +217,7 @@ async def _fetch_quotes(codes: list[str]) -> list[dict]:
     sina_codes = [_to_sina_code(c) for c in codes if _to_sina_code(c)]
     if not sina_codes:
         return []
-    return await asyncio.to_thread(_fetch_sina_quotes_sync, sina_codes)
+    return await _fetch_sina_quotes(sina_codes)
 
 
 def _format_quotes(quotes: list[dict], title: str = "行情") -> str:

@@ -151,25 +151,29 @@ async def _fetch_trains(api_url: str, departure: str, arrival: str) -> dict | No
 
 
 async def _do_query(api_url: str, default_format: str, departure: str, arrival: str, event: AstrMessageEvent):
-    api_data = await _fetch_trains(api_url, departure, arrival)
-    if not api_data:
-        yield event.plain_result("❌ 查询失败或无数据，请检查出发地/目的地或稍后重试。")
-        return
-    fmt = str(default_format).lower()
-    if fmt == "image":
-        image_path = _draw_train_image(api_data)
+    image_path: str | None = None
+    try:
+        api_data = await _fetch_trains(api_url, departure, arrival)
+        if not api_data:
+            yield event.plain_result("❌ 查询失败或无数据，请检查出发地/目的地或稍后重试。")
+            return
+        fmt = str(default_format).lower()
+        if fmt == "image":
+            image_path = _draw_train_image(api_data)
+            if image_path:
+                yield event.image_result(image_path)
+            else:
+                text = _format_train_text(api_data)
+                yield event.plain_result(f"🚆 火车票查询\n\n{text}")
+        else:
+            text = _format_train_text(api_data)
+            yield event.plain_result(f"🚆 火车票查询\n\n{text}")
+    finally:
         if image_path:
-            yield event.image_result(image_path)
             try:
                 os.unlink(image_path)
             except Exception:
                 pass
-        else:
-            text = _format_train_text(api_data)
-            yield event.plain_result(f"🚆 火车票查询\n\n{text}")
-    else:
-        text = _format_train_text(api_data)
-        yield event.plain_result(f"🚆 火车票查询\n\n{text}")
 
 
 async def handle_train_command(event: AstrMessageEvent, config: AstrBotConfig):

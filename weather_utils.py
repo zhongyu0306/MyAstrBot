@@ -159,15 +159,12 @@ async def handle_weather_command(event: AstrMessageEvent, config: AstrBotConfig)
     if _default_url in api_url and not api_key:
         logger.warning("使用 api.nycnm.cn 未读到 API 密钥，请确认在插件配置「天气」中已填写并保存「API 密钥（apikey）」")
 
+    image_path: str | None = None
     try:
         if str(default_format).lower() == "image":
             image_path = await _query_weather_image(api_url, api_key, city, days)
             if image_path:
                 yield event.image_result(image_path)
-                try:
-                    os.unlink(image_path)
-                except Exception:
-                    pass
             else:
                 text = await _query_weather_text(api_url, api_key, city, days)
                 if text:
@@ -191,6 +188,12 @@ async def handle_weather_command(event: AstrMessageEvent, config: AstrBotConfig)
     except Exception as e:
         logger.error("查询天气时发生错误: %s", e)
         yield event.plain_result(f"❌ 查询失败: {str(e)}")
+    finally:
+        if image_path:
+            try:
+                os.unlink(image_path)
+            except Exception:
+                pass
 
 
 async def handle_weather_help(event: AstrMessageEvent):

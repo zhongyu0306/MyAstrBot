@@ -5,8 +5,7 @@ from pathlib import Path
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent
-from astrbot.api.star import Context
-from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+from astrbot.api.star import Context, StarTools
 
 
 class BookkeepingModule:
@@ -16,8 +15,11 @@ class BookkeepingModule:
         self.context = context
         self.config = config
         self.plugin_name = "astrbot_plugin_bookkeeping"
-        data_path_str = get_astrbot_data_path()
-        self.data_path = Path(data_path_str) / "plugin_data" / self.plugin_name
+        try:
+            self.data_path = StarTools.get_data_dir(self.plugin_name)
+        except Exception:
+            # 回退到本地 data 目录，避免因环境不完整导致功能完全不可用
+            self.data_path = Path("data") / "plugin_data" / self.plugin_name
         self.data_path.mkdir(parents=True, exist_ok=True)
         logger.info("记账模块已启动，数据路径: %s", self.data_path)
 

@@ -1,6 +1,6 @@
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star
 
 from .train_utils import handle_train_command, handle_train_help
 from .sy_scheduler_utils import handle_sy_rmd_group, handle_simple_reminder
@@ -42,12 +42,6 @@ class _CmdWrappedEvent:
         return getattr(self._event, name)
 
 
-@register(
-    "astrbot_all_char",
-    "char",
-    "char 系列插件整合版：火车票 / 智能定时任务 / 股票 / 天气 / Epic 免费游戏 / OCR 识别图片（命令模式优先）",
-    "0.1.0",
-)
 class AllCharPlugin(Star):
     """
     统一整合 char 系列插件的入口插件。
@@ -120,11 +114,8 @@ class AllCharPlugin(Star):
     # ---------------- 天气 ----------------
 
     @filter.command("nyweather", alias={"天气", "天气查询", "查天气"})
-    async def cmd_weather(self, event: AstrMessageEvent | None = None):
-        # 兼容 AstrBot 对 handler 参数检查的同时，避免因为参数注入异常导致直接抛 TypeError
-        if event is None:
-            logger.error("cmd_weather 被调用时缺少 event 参数")
-            return
+    async def cmd_weather(self, event: AstrMessageEvent):
+        # 避免同一消息再走自然语言导致回复两次
         event.stop_event()  # 避免同一消息再走自然语言导致回复两次
         async for result in handle_weather_command(event, self.config):
             yield result

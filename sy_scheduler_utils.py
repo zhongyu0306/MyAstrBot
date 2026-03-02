@@ -12,6 +12,7 @@ from astrbot.api.star import Context
 
 
 _PENDING_TASKS: set[asyncio.Task] = set()
+_MAX_REMINDER_DELAY_SECONDS = 12 * 60 * 60  # 简易内存定时上限：12 小时
 
 
 def _parse_time_expression(base: datetime, expr: str) -> Optional[datetime]:
@@ -155,6 +156,10 @@ async def handle_simple_reminder(event: AstrMessageEvent, context: Context, conf
     delay = (target - now).total_seconds()
     if delay < 1:
         yield event.plain_result("时间太近了，请至少设置 1 秒之后。")
+        return
+    if delay > _MAX_REMINDER_DELAY_SECONDS:
+        hours = int(_MAX_REMINDER_DELAY_SECONDS // 3600)
+        yield event.plain_result(f"当前简易提醒暂不支持超过 {hours} 小时的提醒，请使用更短的时间。")
         return
 
     session_id = getattr(event, "unified_msg_origin", None) or getattr(event, "session_id", "")
