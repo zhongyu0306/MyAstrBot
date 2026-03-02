@@ -1,18 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.message_components import At
-from astrbot.api.star import Context
+from astrbot.api.star import Context, StarTools
 
 
-_PENDING_TASKS: set[asyncio.Task] = set()
-_MAX_REMINDER_DELAY_SECONDS = 12 * 60 * 60  # 简易内存定时上限：12 小时
+_REMINDER_FILE_NAME = "simple_reminders.json"
+_REMINDER_LOCK = asyncio.Lock()
 
 
 def _parse_time_expression(base: datetime, expr: str) -> Optional[datetime]:
@@ -67,34 +69,168 @@ def _parse_time_expression(base: datetime, expr: str) -> Optional[datetime]:
     return None
 
 
-async def _reminder_task(
-    delay: float,
-    context: Context,
-    session_id: str,
-    creator_id: Optional[str],
-    creator_name: Optional[str],
-    text: str,
-) -> None:
+def _get_reminder_file_path() -> Path:
+    """获取简易提醒的持久化存储文件路径。"""
     try:
-        if delay <= 0:
-            delay = 1.0
-        await asyncio.sleep(delay)
+        base = StarTools.get_data_dir("astrbot_all_char")
+    except Exception:
+        base = Path("data") / "plugin_data" / "astrbot_all_char"
+    base.mkdir(parents=True, exist_ok=True)
+    return base / _REMINDER_FILE_NAME
 
+
+def _load_all_reminders() -> list[dict]:
+    path = _get_reminder_file_path()
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return data
+        return []
+    except Exception as e:
+        logger.error("读取简易提醒数据失败: %s", e)
+        return []
+
+
+def _save_all_reminders(reminders: list[dict]) -> None:
+    path = _get_reminder_file_path()
+    try:
+        path.write_text(json.dumps(reminders, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.error("保存简易提醒数据失败: %s", e)
+
+
+class _SimpleReminderCenter:
+    """基于 APScheduler 的持久化简易提醒中心。"""
+
+    def __init__(self, context: Context, config: AstrBotConfig):
+        self.context = context
+        self.config = config
+        self._scheduler = None
+        self._available = False
+        self._start_scheduler()
+
+    @property
+    def is_available(self) -> bool:
+        return self._available
+
+    def _start_scheduler(self) -> None:
+        try:
+            from apscheduler.schedulers.asyncio import AsyncIOScheduler
+            from apscheduler.triggers.cron import CronTrigger
+
+            tz = getattr(self.config, "simple_reminder_timezone", "Asia/Shanghai")
+            scheduler = AsyncIOScheduler(timezone=tz)
+            scheduler.add_job(
+                self._run_due_reminders,
+                CronTrigger(second="0", timezone=tz),
+                id="simple_reminder_tick",
+            )
+            scheduler.start()
+            self._scheduler = scheduler
+            self._available = True
+            logger.info("简易提醒持久化调度已启动，时区=%s", tz)
+        except ImportError:
+            logger.warning("未安装 apscheduler，/提醒 持久化定时不可用。")
+            self._scheduler = None
+            self._available = False
+        except Exception as e:
+            logger.error("简易提醒调度启动失败: %s", e)
+            self._scheduler = None
+            self._available = False
+
+    async def add_reminder(
+        self,
+        session_id: str,
+        creator_id: Optional[str],
+        creator_name: Optional[str],
+        text: str,
+        run_at: datetime,
+    ) -> None:
+        """新增一条提醒记录并持久化，由调度器按时发送。"""
+        if not self._available:
+            raise RuntimeError("简易提醒调度未就绪，无法添加提醒。")
+
+        record = {
+            "session_id": session_id,
+            "creator_id": creator_id,
+            "creator_name": creator_name,
+            "text": text,
+            "run_at": run_at.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        async with _REMINDER_LOCK:
+            reminders = _load_all_reminders()
+            reminders.append(record)
+            _save_all_reminders(reminders)
+
+    async def _run_due_reminders(self) -> None:
+        """每分钟轮询一次，将到期的提醒发送出去。"""
+        now = datetime.now()
+        async with _REMINDER_LOCK:
+            reminders = _load_all_reminders()
+            remaining: list[dict] = []
+            for r in reminders:
+                try:
+                    run_at_str = str(r.get("run_at", ""))
+                    if not run_at_str:
+                        continue
+                    run_at = datetime.strptime(run_at_str, "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    continue
+
+                if run_at <= now:
+                    # 到期，发送提醒
+                    session_id = str(r.get("session_id") or "")
+                    if not session_id:
+                        continue
+                    creator_id = r.get("creator_id")
+                    creator_name = r.get("creator_name")
+                    text = str(r.get("text") or "")
+                    asyncio.create_task(
+                        self._send_one(session_id, creator_id, creator_name, text)
+                    )
+                else:
+                    remaining.append(r)
+
+            _save_all_reminders(remaining)
+
+    async def _send_one(
+        self,
+        session_id: str,
+        creator_id: Optional[str],
+        creator_name: Optional[str],
+        text: str,
+    ) -> None:
         chain = MessageChain()
-        # 简单 @ 一下发起人（如果是 QQ 数字 ID）
-        if creator_id and creator_id.isdigit():
+        if creator_id and str(creator_id).isdigit():
             try:
                 chain.chain.append(At(qq=int(creator_id), name=creator_name or None))
             except Exception:
                 pass
-
         chain.message(f"⏰ 提醒：{text}")
         try:
-            await context.send_message(session_id, chain)
+            await self.context.send_message(session_id, chain)
         except Exception as e:
             logger.error("发送定时提醒到 %s 失败: %s", session_id[:50], e)
-    finally:
-        _PENDING_TASKS.discard(asyncio.current_task())  # type: ignore[arg-type]
+
+
+_REMINDER_CENTER: _SimpleReminderCenter | None = None
+
+
+def init_simple_reminder_center(
+    context: Context, config: AstrBotConfig
+) -> Optional[_SimpleReminderCenter]:
+    """初始化（或获取已有的）简易提醒中心，用于持久化定时任务。"""
+    global _REMINDER_CENTER
+    if _REMINDER_CENTER is not None:
+        return _REMINDER_CENTER if _REMINDER_CENTER.is_available else None
+
+    center = _SimpleReminderCenter(context, config)
+    if center.is_available:
+        _REMINDER_CENTER = center
+        return center
+    return None
 
 
 async def handle_simple_reminder(event: AstrMessageEvent, context: Context, config: AstrBotConfig):
@@ -153,15 +289,6 @@ async def handle_simple_reminder(event: AstrMessageEvent, context: Context, conf
         )
         return
 
-    delay = (target - now).total_seconds()
-    if delay < 1:
-        yield event.plain_result("时间太近了，请至少设置 1 秒之后。")
-        return
-    if delay > _MAX_REMINDER_DELAY_SECONDS:
-        hours = int(_MAX_REMINDER_DELAY_SECONDS // 3600)
-        yield event.plain_result(f"当前简易提醒暂不支持超过 {hours} 小时的提醒，请使用更短的时间。")
-        return
-
     session_id = getattr(event, "unified_msg_origin", None) or getattr(event, "session_id", "")
     if not session_id:
         yield event.plain_result("❌ 无法获取当前会话，定时提醒不可用。")
@@ -170,13 +297,18 @@ async def handle_simple_reminder(event: AstrMessageEvent, context: Context, conf
     creator_id = event.get_sender_id()
     creator_name = event.get_sender_name()
 
-    task = asyncio.create_task(
-        _reminder_task(delay, context, session_id, creator_id, creator_name, text)
-    )
-    _PENDING_TASKS.add(task)
+    center = init_simple_reminder_center(context, config)
+    if center is None:
+        yield event.plain_result(
+            "❌ 当前环境未安装 apscheduler，/提醒 的持久化定时不可用。\n"
+            "请在运行环境中安装 apscheduler 后重试。"
+        )
+        return
+
+    await center.add_reminder(session_id, creator_id, creator_name, text, target)
 
     target_str = target.strftime("%Y-%m-%d %H:%M:%S")
-    yield event.plain_result(f"✅ 已设置提醒：{target_str} 提醒你「{text}」。")
+    yield event.plain_result(f"✅ 已设置提醒：{target_str} 提醒你「{text}」。\n（重启后也会继续生效）")
 
 
 async def handle_sy_rmd_group(event: AstrMessageEvent, context: Context, config: AstrBotConfig):

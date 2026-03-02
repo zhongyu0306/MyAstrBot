@@ -3,7 +3,7 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
 
 from .train_utils import handle_train_command, handle_train_help
-from .sy_scheduler_utils import handle_sy_rmd_group, handle_simple_reminder
+from .sy_scheduler_utils import handle_sy_rmd_group, handle_simple_reminder, init_simple_reminder_center
 from .stock_utils import handle_stock_command
 from .weather_utils import handle_weather_command, handle_weather_help
 from .epic_utils import handle_epic_command, handle_epic_help
@@ -57,6 +57,8 @@ class AllCharPlugin(Star):
         self.context = context
         self.config = ensure_flat_config(config)
         logger.info("astrbot_all_char 插件初始化完成（仅指令模式）")
+        # 初始化简易提醒的持久化调度中心，保证重启后可自动恢复未到期提醒
+        init_simple_reminder_center(self.context, self.config)
 
     # ---------------- 火车票 ----------------
 
