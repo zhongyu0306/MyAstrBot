@@ -1,3 +1,207 @@
+## 多功能生活助手（astrbot_all_char）
+
+`astrbot_all_char` 是对原 char 系列多个热门插件的整合版本，一套插件覆盖火车票查询、天气查询、股票行情、简易提醒、记账、千帆智能搜索等高频需求，统一配置、统一指令、统一维护。
+
+在保持原有「命令模式」兼容的基础上，本插件额外提供了一组 **LLM 工具（FunctionTool + add_llm_tools）**，方便在自然语言对话中由 Agent 自动调用。
+
+### 已注册的 LLM 工具一览
+
+- **stock_query**
+  - **功能**: 查询股票当前行情。
+  - **参数**:
+    - `query` (string, 必填): 股票代码（如 `600519`）或名称关键字（如 `贵州茅台`）。
+  - **说明**: 内部使用新浪行情源，若按名称匹配到多只股票，会返回候选列表让模型引导用户改用代码查询。
+
+- **weather_query**
+  - **功能**: 查询城市天气。
+  - **参数**:
+    - `city` (string, 必填): 城市名称，例如 `北京`。
+    - `days` (integer, 选填): 预报天数 `1-7`，缺省或小于 2 视为当天。
+  - **说明**: 复用原天气模块逻辑，优先按配置的 `weather_api_url` / `weather_api_key` 请求，默认使用 `api.nycnm.cn`。
+
+- **train_query**
+  - **功能**: 查询两地之间的火车票/车次信息。
+  - **参数**:
+    - `departure` (string, 必填): 出发地城市或站点，例如 `厦门`。
+    - `arrival` (string, 必填): 目的地城市或站点，例如 `上海`。
+  - **说明**: 复用原火车票模块的查询接口，默认使用 `https://api.lolimi.cn/API/hc/api`。
+
+- **simple_reminder**
+  - **功能**: 设置一个简易定时提醒（等价于命令 `/提醒`）。
+  - **参数**:
+    - `time_expression` (string, 必填): 时间表达式，如 `3分钟后`、`2小时后`、`2026-02-28-08:00`、`08:30`。
+    - `text` (string, 必填): 提醒内容，例如 `喝水`、`去开会`。
+  - **说明**: 使用 APScheduler 做持久化调度，消息重启后仍会按时触发。
+
+- **bookkeeping_add_expense**
+  - **功能**: 记录一笔支出，并由 LLM 自动分类。
+  - **参数**:
+    - `amount` (number, 必填): 支出金额，单位元。
+    - `description` (string, 选填): 支出描述，例如 `中午吃饭`。
+
+- **bookkeeping_add_income**
+  - **功能**: 记录一笔收入，并由 LLM 自动分类。
+  - **参数**:
+    - `amount` (number, 必填): 收入金额，单位元。
+    - `description` (string, 选填): 收入描述，例如 `工资`、`发红包`。
+
+- **bookkeeping_summary**
+  - **功能**: 查看当前用户的记账总收入、总支出和余额，并给出简要 AI 财务建议。
+  - **参数**: 无。
+
+- **smart_search**
+  - **功能**: 使用百度千帆智能搜索（`ai_search/chat/completions`）查询复杂问题，并交由当前会话 LLM 重新整理输出。
+  - **参数**:
+    - `query` (string, 必填): 要搜索的问题或主题。
+  - **说明**: 本地统计每日最多 `100` 次（`DAILY_LIMIT_SMART`），超过后会拒绝调用。
+
+- **web_search**
+  - **功能**: 使用百度千帆网页搜索（`ai_search/web_search`）查询信息，并交由当前会话 LLM 重新整理输出。
+  - **参数**:
+    - `query` (string, 必填): 要搜索的关键词。
+  - **说明**: 本地统计每日最多 `1000` 次（`DAILY_LIMIT_WEB`），超过后会拒绝调用。
+
+### 与命令模式的对应关系
+
+- **股票**:  
+  - 命令: `/股票 查询 600519`  
+  - LLM 工具: `stock_query`（参数 `query="600519"`）
+
+- **天气**:  
+  - 命令: `/天气 北京 5`  
+  - LLM 工具: `weather_query`（参数 `city="北京"`, `days=5`）
+
+- **火车票**:  
+  - 命令: `/火车票 厦门 上海`  
+  - LLM 工具: `train_query`（参数 `departure="厦门"`, `arrival="上海"`）
+
+- **简易提醒**:  
+  - 命令: `/提醒 3分钟后 喝水`  
+  - LLM 工具: `simple_reminder`（参数 `time_expression="3分钟后"`, `text="喝水"`）
+
+- **记账**:  
+  - 命令: `记账支出 35 中午吃饭`  
+  - LLM 工具: `bookkeeping_add_expense`（参数 `amount=35`, `description="中午吃饭"`）
+
+### 在 Agent / Skill 中使用建议
+
+- **工具发现**:  
+  在构建 Agent 的工具列表时，可以直接暴露上述工具的 `name`、`description` 和 `parameters` 结构，让大模型根据自然语言自动选择合适的工具调用。
+
+- **提示词建议**:  
+  在系统提示词中，可以用简短中文列出这些工具用途，例如：
+  > 你可以使用以下工具：  
+  > - `stock_query`: 查询 A 股股票行情  
+  > - `weather_query`: 查询城市天气  
+  > - `train_query`: 查询火车票车次信息  
+  > - `simple_reminder`: 帮用户设置定时提醒  
+  > - `bookkeeping_*`: 帮用户记账与查看统计  
+  > - `smart_search` / `web_search`: 需要上网查资料时调用。
+
+这样，大模型在理解用户自然语言意图时，就能像使用 `astrbot_plugin_payqr` 一样，自动发现并调用 `astrbot_all_char` 提供的这些技能。
+
+## 多功能生活助手（astrbot_all_char）
+
+`astrbot_all_char` 是对原 char 系列多个热门插件的整合版本，一套插件覆盖火车票查询、天气查询、股票行情、简易提醒、记账、千帆智能搜索等高频需求，统一配置、统一指令、统一维护。
+
+在保持原有「命令模式」兼容的基础上，本插件额外提供了一组 **LLM 工具（FunctionTool + add_llm_tools）**，方便在自然语言对话中由 Agent 自动调用。
+
+### 已注册的 LLM 工具一览
+
+- **stock_query**
+  - **功能**: 查询股票当前行情。
+  - **参数**:
+    - `query` (string, 必填): 股票代码（如 `600519`）或名称关键字（如 `贵州茅台`）。
+  - **说明**: 内部使用新浪行情源，若按名称匹配到多只股票，会返回候选列表让模型引导用户改用代码查询。
+
+- **weather_query**
+  - **功能**: 查询城市天气。
+  - **参数**:
+    - `city` (string, 必填): 城市名称，例如 `北京`。
+    - `days` (integer, 选填): 预报天数 `1-7`，缺省或小于 2 视为当天。
+  - **说明**: 复用原天气模块逻辑，优先按配置的 `weather_api_url` / `weather_api_key` 请求，默认使用 `api.nycnm.cn`。
+
+- **train_query**
+  - **功能**: 查询两地之间的火车票/车次信息。
+  - **参数**:
+    - `departure` (string, 必填): 出发地城市或站点，例如 `厦门`。
+    - `arrival` (string, 必填): 目的地城市或站点，例如 `上海`。
+  - **说明**: 复用原火车票模块的查询接口，默认使用 `https://api.lolimi.cn/API/hc/api`。
+
+- **simple_reminder**
+  - **功能**: 设置一个简易定时提醒（等价于命令 `/提醒`）。
+  - **参数**:
+    - `time_expression` (string, 必填): 时间表达式，如 `3分钟后`、`2小时后`、`2026-02-28-08:00`、`08:30`。
+    - `text` (string, 必填): 提醒内容，例如 `喝水`、`去开会`。
+  - **说明**: 使用 APScheduler 做持久化调度，消息重启后仍会按时触发。
+
+- **bookkeeping_add_expense**
+  - **功能**: 记录一笔支出，并由 LLM 自动分类。
+  - **参数**:
+    - `amount` (number, 必填): 支出金额，单位元。
+    - `description` (string, 选填): 支出描述，例如 `中午吃饭`。
+
+- **bookkeeping_add_income**
+  - **功能**: 记录一笔收入，并由 LLM 自动分类。
+  - **参数**:
+    - `amount` (number, 必填): 收入金额，单位元。
+    - `description` (string, 选填): 收入描述，例如 `工资`、`发红包`。
+
+- **bookkeeping_summary**
+  - **功能**: 查看当前用户的记账总收入、总支出和余额，并给出简要 AI 财务建议。
+  - **参数**: 无。
+
+- **smart_search**
+  - **功能**: 使用百度千帆智能搜索（`ai_search/chat/completions`）查询复杂问题，并交由当前会话 LLM 重新整理输出。
+  - **参数**:
+    - `query` (string, 必填): 要搜索的问题或主题。
+  - **说明**: 本地统计每日最多 `100` 次（`DAILY_LIMIT_SMART`），超过后会拒绝调用。
+
+- **web_search**
+  - **功能**: 使用百度千帆网页搜索（`ai_search/web_search`）查询信息，并交由当前会话 LLM 重新整理输出。
+  - **参数**:
+    - `query` (string, 必填): 要搜索的关键词。
+  - **说明**: 本地统计每日最多 `1000` 次（`DAILY_LIMIT_WEB`），超过后会拒绝调用。
+
+### 与命令模式的对应关系
+
+- **股票**:  
+  - 命令: `/股票 查询 600519`  
+  - LLM 工具: `stock_query`（参数 `query="600519"`）
+
+- **天气**:  
+  - 命令: `/天气 北京 5`  
+  - LLM 工具: `weather_query`（参数 `city="北京"`, `days=5`）
+
+- **火车票**:  
+  - 命令: `/火车票 厦门 上海`  
+  - LLM 工具: `train_query`（参数 `departure="厦门"`, `arrival="上海"`）
+
+- **简易提醒**:  
+  - 命令: `/提醒 3分钟后 喝水`  
+  - LLM 工具: `simple_reminder`（参数 `time_expression="3分钟后"`, `text="喝水"`）
+
+- **记账**:  
+  - 命令: `记账支出 35 中午吃饭`  
+  - LLM 工具: `bookkeeping_add_expense`（参数 `amount=35`, `description="中午吃饭"`）
+
+### 在 Agent / Skill 中使用建议
+
+- **工具发现**:  
+  在构建 Agent 的工具列表时，可以直接暴露上述工具的 `name`、`description` 和 `parameters` 结构，让大模型根据自然语言自动选择合适的工具调用。
+
+- **提示词建议**:  
+  在系统提示词中，可以用简短中文列出这些工具用途，例如：
+  > 你可以使用以下工具：  
+  > - `stock_query`: 查询 A 股股票行情  
+  > - `weather_query`: 查询城市天气  
+  > - `train_query`: 查询火车票车次信息  
+  > - `simple_reminder`: 帮用户设置定时提醒  
+  > - `bookkeeping_*`: 帮用户记账与查看统计  
+  > - `smart_search` / `web_search`: 需要上网查资料时调用。
+
+这样，大模型在理解用户自然语言意图时，就能像使用 `astrbot_plugin_payqr` 一样，自动发现并调用 `astrbot_all_char` 提供的这些技能。
+
 ## astrbot_all_char 多功能合集插件（char 系列）
 
 整合以下独立插件到一个统一插件中，便于统一维护与配置：
