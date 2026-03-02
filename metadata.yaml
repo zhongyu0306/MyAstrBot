@@ -1,5 +1,6 @@
-name: "astrbot_all_char"
-desc: "char 系列插件整合版：火车票 / 智能定时任务 / 股票 / 天气 / Epic 免费游戏 / 今日运势 / 记账（命令模式优先）"
+name: "astrbot_plugin_char_all"
+desc: "多功能生活助手（char 合集） 是对原 char 系列多个热门插件的整合版，一套插件搞定日常查询、提醒、记账、搜素等高频需求，统一配置、统一指令、统一维护。"
+repo: "https://github.com/zhongyu0306/MyAstrBot"
 version: "0.1.0"
 author: "char"
 
