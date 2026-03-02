@@ -6,7 +6,7 @@ from typing import Any
 
 from astrbot.api import AstrBotConfig
 
-_MODULE_KEYS = ("train", "sy", "stock", "weather", "epic", "jrys", "ocr", "qianfan_search", "natural_language")
+_MODULE_KEYS = ("train", "sy", "stock", "weather", "epic", "jrys", "ocr", "qianfan_search")
 _SENTINEL = object()
 
 

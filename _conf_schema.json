@@ -1,7 +1,7 @@
 {
   "train": {
     "description": "火车票查询",
-    "hint": "API 地址、返回格式与自然语言识别。",
+    "hint": "火车票查询 API 与返回格式配置。",
     "type": "object",
     "items": {
       "train_api_url": {
@@ -16,12 +16,6 @@
         "options": ["text", "image"],
         "hint": "text=纯文本，image=表格图片",
         "default": "text"
-      },
-      "train_enable_natural": {
-        "description": "启用自然语言识别",
-        "type": "bool",
-        "hint": "开启后可直接说「从厦门到上海的车票」等自动查询",
-        "default": true
       }
     }
   },
@@ -151,7 +145,7 @@
   },
   "weather": {
     "description": "天气查询https://api.nycnm.cn/template/home/galaxy/index.php",
-    "hint": "API 地址、返回格式与自然语言识别。",
+    "hint": "天气查询 API 与返回格式配置。",
     "type": "object",
     "items": {
       "weather_api_url": {
@@ -172,18 +166,12 @@
         "options": ["text", "image"],
         "hint": "text=文本，image=图片",
         "default": "image"
-      },
-      "weather_enable_natural": {
-        "description": "启用自然语言识别",
-        "type": "bool",
-        "hint": "开启后可直接说「北京天气」「上海今天多少度」等自动查天气。",
-        "default": true
       }
     }
   },
   "epic": {
     "description": "Epic 免费游戏",
-    "hint": "API、自然语言识别与定时推送。",
+    "hint": "Epic 免费游戏 API 与定时推送配置。",
     "type": "object",
     "items": {
       "epic_api_url": {
@@ -204,12 +192,6 @@
         "type": "string",
         "hint": "若接口需要则填写，FAPI 部分接口无需密钥",
         "default": ""
-      },
-      "epic_enable_natural": {
-        "description": "启用自然语言识别",
-        "type": "bool",
-        "hint": "开启后可直接说「Epic 免费游戏」「喜加一」「白嫖游戏」等自动查询。",
-        "default": true
       },
       "epic_enable_timer": {
         "description": "启用定时推送",
@@ -362,72 +344,10 @@
       }
     }
   },
-  "natural_language": {
-    "description": "自然语言触发",
-    "hint": "在保留全部指令的前提下，对「非 / 开头」的消息做意图匹配并复用对应功能；命中后终止后续 LLM，避免重复回复。",
+  "natural_language_legacy": {
+    "description": "（已废弃）自然语言触发相关配置，保留此块仅为兼容旧配置文件，代码中不会再读取这些字段。",
+    "hint": "如果是全新部署，可以忽略本配置块；后续版本可以安全删除整个 natural_language_legacy 节点。",
     "type": "object",
-    "items": {
-      "nl_enabled": {
-        "description": "启用自然语言触发",
-        "type": "bool",
-        "hint": "关闭后仅响应 / 指令，不解析自然语言；不想用自然语言时关掉此项即可。",
-        "obvious_hint": true,
-        "default": true
-      },
-      "nl_weather_enabled": {
-        "description": "天气自然语言",
-        "type": "bool",
-        "hint": "如：北京天气、上海今天多少度",
-        "default": true
-      },
-      "nl_train_enabled": {
-        "description": "火车票自然语言",
-        "type": "bool",
-        "hint": "如：从厦门到上海的车票",
-        "default": true
-      },
-      "nl_reminder_enabled": {
-        "description": "提醒自然语言",
-        "type": "bool",
-        "hint": "如：3分钟后提醒我喝水",
-        "default": true
-      },
-      "nl_stock_enabled": {
-        "description": "股票自然语言",
-        "type": "bool",
-        "hint": "如：贵州茅台股价、我的自选股",
-        "default": true
-      },
-      "nl_epic_enabled": {
-        "description": "Epic 自然语言",
-        "type": "bool",
-        "hint": "如：喜加一、Epic免费游戏",
-        "default": true
-      },
-      "nl_jrys_enabled": {
-        "description": "今日运势自然语言",
-        "type": "bool",
-        "hint": "如：今日运势、运势",
-        "default": true
-      },
-      "nl_smart_search_enabled": {
-        "description": "智能搜索自然语言",
-        "type": "bool",
-        "hint": "如：帮我查一下 xxx、智能搜索 xxx",
-        "default": true
-      },
-      "nl_web_search_enabled": {
-        "description": "网页搜索自然语言",
-        "type": "bool",
-        "hint": "如：搜索 关键词、搜一下 xxx",
-        "default": true
-      },
-      "nl_bookkeeping_enabled": {
-        "description": "记账自然语言",
-        "type": "bool",
-        "hint": "如：支出 20 咖啡、今天花了多少",
-        "default": true
-      }
-    }
+    "items": {}
   }
 }
