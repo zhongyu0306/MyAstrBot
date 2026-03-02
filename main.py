@@ -1,6 +1,7 @@
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
+
 from .train_utils import handle_train_command, handle_train_help
 from .sy_scheduler_utils import handle_sy_rmd_group, handle_simple_reminder
 from .stock_utils import handle_stock_command
@@ -23,6 +24,22 @@ from .qianfan_search_utils import (
     handle_web_search_command,
 )
 from .config_utils import ensure_flat_config
+
+
+class _CmdWrappedEvent:
+    """包装原始 event，使 get_message_str 返回伪造的指令字符串，便于在 LLM Tool 中复用现有指令 handler。"""
+
+    __slots__ = ("_event", "_fake_message")
+
+    def __init__(self, original: AstrMessageEvent, fake_message: str):
+        self._event = original
+        self._fake_message = fake_message.strip()
+
+    def get_message_str(self) -> str:
+        return self._fake_message
+
+    def __getattr__(self, name: str):
+        return getattr(self._event, name)
 
 
 @register(
@@ -206,5 +223,45 @@ class AllCharPlugin(Star):
         /搜索 <关键词>：千帆网页搜索后由当前 LLM 整理输出。每日限 1000 次。
         """
         async for result in handle_web_search_command(event, self.context, self.config):
+            yield result
+
+    # ---------------- LLM Tools（供 AI 自动调用） ----------------
+
+    @filter.llm_tool(name="stock_query")
+    async def tool_stock_query(self, event: AstrMessageEvent, query: str):
+        """查询股票当前行情。
+
+        Args:
+            query(string): 股票代码（如 600519）或名称关键字（如 贵州茅台）。
+        """
+        # 复用 /股票 查询 的指令解析逻辑
+        fake = f"/股票 查询 {query}"
+        wrapped = _CmdWrappedEvent(event, fake)
+        async for result in handle_stock_command(wrapped, self.context, self.config):
+            yield result
+
+    @filter.llm_tool(name="weather_query")
+    async def tool_weather_query(self, event: AstrMessageEvent, city: str, days: str | None = None):
+        """查询城市天气。
+
+        Args:
+            city(string): 城市名称，例如 北京。
+            days(number): 预报天数（1-7，可选）。
+        """
+        day_int: int | None = None
+        if days:
+            try:
+                d = int(str(days))
+                if d >= 2:
+                    day_int = d
+            except ValueError:
+                day_int = None
+
+        parts = ["/天气", city]
+        if day_int is not None:
+            parts.append(str(day_int))
+        fake = " ".join(parts)
+        wrapped = _CmdWrappedEvent(event, fake)
+        async for result in handle_weather_command(wrapped, self.config):
             yield result
 

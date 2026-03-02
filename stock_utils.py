@@ -259,7 +259,7 @@ class StockModule:
                 id="stock_reminder_minute",
             )
             self._scheduler.start()
-            logger.info("股票定时提醒已启动")
+            logger.info("股票定时提醒已启动，时区=%s", tz)
         except ImportError:
             logger.warning("未安装 apscheduler，定时提醒不可用")
         except Exception as e:
@@ -291,6 +291,15 @@ class StockModule:
                     to_remove.append((session_id, r.get("time")))
                 creator_id = r.get("creator_id")
                 creator_name = r.get("creator_name")
+                logger.info(
+                    "股票定时提醒触发：session_id=%s time=%s repeat=%s creator_id=%s creator_name=%s stocks=%s",
+                    session_id,
+                    current_time,
+                    r.get("repeat"),
+                    creator_id,
+                    creator_name,
+                    ",".join(stocks),
+                )
                 if creator_id:
                     if creator_id not in mention_creators:
                         mention_creators[creator_id] = creator_name
@@ -513,6 +522,14 @@ class StockModule:
             data = _load_watchlist()
             data[session_id] = rec
             _save_watchlist(data)
+            logger.info(
+                "股票定时提醒已设置：session_id=%s time=%s repeat=%s creator_id=%s creator_name=%s",
+                session_id,
+                time_str,
+                repeat,
+                creator_id,
+                creator_name,
+            )
             yield event.plain_result(f"✅ 已设置 {time_str} 定时提醒（{'每天' if repeat == 'daily' else '仅一次'}）")
 
         elif cmd in ("提醒列表", "remindlist"):
@@ -577,6 +594,14 @@ class StockModule:
             data = _load_watchlist()
             data[session_id] = rec
             _save_watchlist(data)
+            logger.info(
+                "股票价格提醒已设置（跌到）：session_id=%s code=%s target=%.4f creator_id=%s creator_name=%s",
+                session_id,
+                code,
+                price,
+                creator_id,
+                creator_name,
+            )
             yield event.plain_result(f"✅ 已设置：{code} 跌到 {price} 元时提醒。")
 
         elif cmd in ("涨到", "提醒涨", "涨价提醒"):
@@ -613,6 +638,14 @@ class StockModule:
             data = _load_watchlist()
             data[session_id] = rec
             _save_watchlist(data)
+            logger.info(
+                "股票价格提醒已设置（涨到）：session_id=%s code=%s target=%.4f creator_id=%s creator_name=%s",
+                session_id,
+                code,
+                price,
+                creator_id,
+                creator_name,
+            )
             yield event.plain_result(f"✅ 已设置：{code} 涨到 {price} 元时提醒。")
 
         elif cmd in ("价格提醒列表", "跌价列表", "涨价列表"):
