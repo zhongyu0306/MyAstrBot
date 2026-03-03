@@ -58,6 +58,11 @@ from .qianfan_search_utils import (
     handle_web_search_command,
 )
 from .config_utils import ensure_flat_config
+from .music_utils import (
+    handle_music_command,
+    handle_music_number_selection,
+    llm_play_music_by_keyword,
+)
 
 
 def _get_effective_config(ctx: Context, plugin_config: AstrBotConfig | None) -> AstrBotConfig | dict:
@@ -125,6 +130,7 @@ class AllCharPlugin(Star):
                 SmartSearchTool(),
                 WebSearchTool(),
                 AnimeTraceTool(),
+                MusicPlayTool(),
             )
             logger.info(
                 "astrbot_all_char 已注册 LLM 工具：股票、天气、火车票、提醒、记账、智能搜索/网页搜索等"
@@ -576,6 +582,45 @@ class AllCharPlugin(Star):
         wrapped = _CmdWrappedEvent(event, fake)
         async for result in handle_web_search_command(wrapped, self.context, self.config):
             yield result
+
+    # ---------------- 点歌命令与数字选择 ----------------
+
+    @filter.command("点歌", alias={"music", "唱歌", "唱"})
+    async def cmd_music(self, event: AstrMessageEvent):
+        """
+        点歌命令入口：/点歌 <关键词>
+
+        示例：
+        - /点歌 青花
+        - /点歌 夜曲 周杰伦
+        """
+        await handle_music_command(event, self.context, self.config)
+
+    @filter.regex(r"^\d+$", priority=999)
+    async def music_number_selection(self, event: AstrMessageEvent):
+        """
+        仅在存在点歌会话时拦截纯数字回复，用于选择歌曲序号。
+        """
+        await handle_music_number_selection(event, self.context, self.config)
+
+    # ---------------- LLM Tool：点歌 ----------------
+
+    @filter.llm_tool(name="music_play")
+    async def tool_music_play(self, event: AstrMessageEvent, keyword: str):
+        """按关键词点歌，自动选择最匹配的一首并返回播放链接。
+
+        使用建议（给 LLM 的决策规则）：
+        - 用户说「帮我点一首歌/放一下 XXX」时优先调用；
+        - 关键词可包含歌名与歌手，例如「夜曲 周杰伦」；
+        - 工具会返回一段包含歌曲信息与音频 URL 的文本，前端可据此发起真实播放。
+
+        Args:
+            keyword(string): 歌曲名称或相关关键词，例如「青花」或「夜曲 周杰伦」。
+        """
+        ctx_wrapper = ContextWrapper[AstrAgentContext](self.context)  # type: ignore[type-arg]
+        tool = MusicPlayTool()
+        result = await tool.call(ctx_wrapper, event=event, keyword=keyword)
+        yield event.plain_result(str(result))
 
 
 @dataclass
@@ -1249,4 +1294,40 @@ class AnimeTraceTool(FunctionTool[AstrAgentContext]):
         max_len = 4000
         if len(text) > max_len:
             text = text[:max_len] + "\n\n（结果过长，已截断显示。）"
+        return text
+
+
+@dataclass
+class MusicPlayTool(FunctionTool[AstrAgentContext]):
+    """
+    点歌 LLM 工具：根据关键词选择一首歌并返回播放链接。
+    """
+
+    name: str = "music_play"
+    description: str = "根据歌曲名称或关键词点歌，自动选择最匹配的一首并返回播放链接。"
+    parameters: dict = Field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "keyword": {
+                    "type": "string",
+                    "description": "歌曲名称或相关关键词，例如「青花」或「夜曲 周杰伦」。",
+                }
+            },
+            "required": ["keyword"],
+        }
+    )
+
+    async def call(
+        self,
+        context: ContextWrapper[AstrAgentContext],
+        keyword: str,
+        event: AstrMessageEvent | None = None,
+        **kwargs,
+    ) -> ToolExecResult:
+        ctx = context.context.context
+        cfg = _get_effective_config(ctx, AllCharPlugin._shared_config)  # type: ignore[arg-type]
+        # 优先使用当前事件（若存在），以便在 QQ 等平台发送 node / 语音 / 文件等多模态消息
+        real_event = event or context.context.event
+        text = await llm_play_music_by_keyword(ctx, cfg, keyword, event=real_event)
         return text

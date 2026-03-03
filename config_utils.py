@@ -16,6 +16,7 @@ _MODULE_KEYS = (
     "ocr",
     "qianfan_search",
     "animetrace",
+    "music",
 )
 _SENTINEL = object()
 

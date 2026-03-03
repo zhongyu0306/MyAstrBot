@@ -343,6 +343,145 @@
       }
     }
   },
+  "music": {
+    "description": "点歌与音乐播放（兼容原 astrbot_plugin_music 配置）",
+    "hint": "本配置块基本等价于 astrbot_plugin_music 的 _conf_schema，方便从原插件平滑迁移。",
+    "type": "object",
+    "items": {
+      "default_player_name": {
+        "description": "默认点歌平台",
+        "hint": "定义点歌命令默认使用的平台。所有平台都支持用命令实时调用：网易点歌、nj点歌、QQ点歌、酷狗点歌、酷我点歌、百度点歌、一听点歌、咪咕点歌、荔枝点歌、蜻蜓点歌、喜马拉雅、5sing原创、5sing翻唱、全民K歌",
+        "type": "string",
+        "options": [
+          "网易点歌",
+          "nj点歌",
+          "QQ点歌",
+          "酷狗点歌",
+          "酷我点歌",
+          "百度点歌",
+          "一听点歌",
+          "咪咕点歌",
+          "荔枝点歌",
+          "蜻蜓点歌",
+          "喜马拉雅",
+          "5sing原创",
+          "5sing翻唱",
+          "全民K歌"
+        ],
+        "default": "网易点歌"
+      },
+      "nodejs_base_url": {
+        "description": "NodeJS 服务 API 根地址",
+        "hint": "此项配置决定网易云 NodeJS 项目的 API 根地址，对应 astrbot_plugin_music 的 nodejs_base_url。",
+        "type": "string",
+        "default": "https://163api.qijieya.cn"
+      },
+      "song_limit": {
+        "description": "搜索歌曲数量限制",
+        "hint": "搜索返回的候选歌曲数量上限。",
+        "type": "int",
+        "slider": {
+          "min": 1,
+          "max": 20,
+          "step": 1
+        },
+        "default": 5
+      },
+      "select_mode": {
+        "description": "选择模式",
+        "hint": "此配置决定搜索歌曲的展示方法。single(单曲模式) 默认选取第一首歌曲。",
+        "type": "string",
+        "options": [
+          "text(文本模式)",
+          "single(单曲模式)"
+        ],
+        "default": "text(文本模式)"
+      },
+      "send_modes": {
+        "description": "发送模式优先级",
+        "hint": "决定发送歌曲方式的优先级，排在前面的模式优先，发送失败时自动尝试下一种。注意：card 仅 QQ 发送网易云音乐时可用。",
+        "type": "list",
+        "options": [
+          "card(卡片模式)",
+          "record(语音模式)",
+          "file(文件模式)",
+          "text(文本模式)"
+        ],
+        "default": [
+          "card(卡片模式)",
+          "record(语音模式)",
+          "file(文件模式)",
+          "text(文本模式)"
+        ]
+      },
+      "enable_comments": {
+        "description": "是否启用热评",
+        "hint": "开启后在发送歌曲后附加一条歌曲热评。",
+        "type": "bool",
+        "default": true
+      },
+      "enable_lyrics": {
+        "description": "是否启用歌词图片",
+        "hint": "开启后在发送歌曲后附加一张歌词图片（依赖下游图片渲染能力）。",
+        "type": "bool",
+        "default": false
+      },
+      "proxy": {
+        "description": "网络代理地址",
+        "hint": "如 http://127.0.0.1:7890，留空则直连。作用于插件内部的网络请求。",
+        "type": "string",
+        "default": ""
+      },
+      "timeout": {
+        "description": "点歌操作超时时长（秒）",
+        "hint": "点歌时用户在此时间内没有进行操作则自动取消点歌。",
+        "type": "int",
+        "slider": {
+          "min": 30,
+          "max": 300,
+          "step": 10
+        },
+        "default": 30
+      },
+      "timeout_recall": {
+        "description": "超时后撤回选歌消息",
+        "hint": "达到超时时长后，撤回之前发送的选歌消息（仅 aiocqhttp 平台支持）。",
+        "type": "bool",
+        "default": true
+      },
+      "clear_cache": {
+        "description": "重载插件时清空缓存",
+        "hint": "文件模式会在本地缓存音频文件，缓存目录 data/plugin_data/astrbot_plugin_music/songs，此选项控制重载时是否清空缓存。",
+        "type": "bool",
+        "default": true
+      },
+      "playlist_limit": {
+        "description": "歌单容量限制",
+        "hint": "决定了用户歌单最多能添加多少首歌。",
+        "type": "int",
+        "slider": {
+          "min": 10,
+          "max": 200,
+          "step": 1
+        },
+        "default": 100
+      },
+      "enc_sec_key": {
+        "description": "网易云野生密钥（兼容保留）",
+        "hint": "直接从原 astrbot_plugin_music _conf_schema 迁移，通常保持默认即可。",
+        "type": "string",
+        "invisible": true,
+        "default": "45c8bcb07e69c6b545d3045559bd300db897509b8720ee2b45a72bf2d3b216ddc77fb10daec4ca54b466f2da1ffac1e67e245fea9d842589dc402b92b262d3495b12165a721aed880bf09a0a99ff94c959d04e49085dc21c78bbbe8e3331827c0ef0035519e89f097511065643120cbc478f9c0af96400ba4649265781fc9079"
+      },
+      "enc_params": {
+        "description": "网易云 Params（兼容保留）",
+        "hint": "直接从原 astrbot_plugin_music _conf_schema 迁移，通常保持默认即可。",
+        "type": "string",
+        "invisible": true,
+        "default": "D33zyir4L/58v1qGPcIPjSee79KCzxBIBy507IYDB8EL7jEnp41aDIqpHBhowfQ6iT1Xoka8jD+0p44nRKNKUA0dv+n5RWPOO57dZLVrd+T1J/sNrTdzUhdHhoKRIgegVcXYjYu+CshdtCBe6WEJozBRlaHyLeJtGrABfMOEb4PqgI3h/uELC82S05NtewlbLZ3TOR/TIIhNV6hVTtqHDVHjkekrvEmJzT5pk1UY6r0="
+      }
+    }
+  },
   "qianfan_search": {
     "description": "百度千帆智能搜索与网页搜索",
     "hint": "/智能搜索、/搜索 使用 X-Appbuilder-Authorization 鉴权；网页搜索结果可自定义交给 LLM 的提示词。",
