@@ -61,6 +61,14 @@
     - `query` (string, 必填): 要搜索的关键词。
   - **说明**: 本地统计每日最多 `1000` 次（`DAILY_LIMIT_WEB`），超过后会拒绝调用。
 
+- **anime_trace**
+  - **功能**: 使用 AnimeTrace API 识别动漫图片所属番剧、角色等信息。
+  - **参数**:
+    - `image` (string, 选填): 要识别的图片 URL 或本地路径；留空时会自动从当前会话中最近一条带图消息提取第一张图片。
+    - `is_multi` (boolean, 选填): 是否返回多个候选结果；不填时使用插件配置 `animetrace_is_multi`。
+    - `model` (string, 选填): AnimeTrace 识别模型名称；不填时使用插件配置 `animetrace_model`（例如 `animetrace_high_beta`）。
+  - **说明**: 适用于「这是谁/出自哪部番/帮我搜番」等需求，返回结果包含番剧标题、相似度、集数/时间点和预览图链接等信息。
+
 ### 与命令模式的对应关系
 
 - **股票**:  
@@ -96,7 +104,8 @@
   > - `train_query`: 查询火车票车次信息  
   > - `simple_reminder`: 帮用户设置定时提醒  
   > - `bookkeeping_*`: 帮用户记账与查看统计  
-  > - `smart_search` / `web_search`: 需要上网查资料时调用。
+  > - `smart_search` / `web_search`: 需要上网查资料时调用。  
+  > - `anime_trace`: 当用户给出动漫截图/角色立绘并询问来源或人物信息时调用。
 
 这样，大模型在理解用户自然语言意图时，就能像使用 `astrbot_plugin_payqr` 一样，自动发现并调用 `astrbot_all_char` 提供的这些技能。
 
@@ -294,6 +303,14 @@
   - 百度千帆：鉴权、`/智能搜索`（千帆智能搜索 + 当前 LLM 整理）、`/搜索`（web_search + 当前 LLM 整理）。
 - `natural_language_utils.py`
   - 自然语言意图匹配与统一入口：天气/火车票/提醒/股票/Epic/运势/智能搜索/网页搜索/记账等；命中后复用对应 handler 并建议终止事件传播。
+
+> **开发规范（LLM Tool 一致性）**  
+> - 每新增一类功能模块（如新的查询/识别/工具服务），应同时提供：  
+>   - 对应的命令入口（`@filter.command`）  
+>   - 至少一个 LLM 工具封装：  
+>     - `@filter.llm_tool` 事件级入口（可选，用于在对话中直接调用）；  
+>     - 一个 `FunctionTool` 子类（如 `XXXTool`），并在插件初始化时通过 `context.add_llm_tools(...)` 注册，包含详细的参数 schema 与「使用建议（给 LLM 的决策规则）」文档注释。  
+> - 新增功能时，请在本 `README.md` 的「已注册的 LLM 工具一览」中同步补充对应工具的说明，保持文档与实现一致。
 
 后续如需新增功能模块，请优先新增独立的 `xxx_utils.py` 或子包，而不是在 `main.py` 中继续堆代码。
 

@@ -147,13 +147,22 @@ def _format_animetrace_result(data: dict[str, Any]) -> str:
             lines.append(f"\n[{idx}] {item}")
             continue
 
+        # 作品/标题优先从显式字段拿；没有的话，再从 character 列表推断
         title = (
             item.get("title")
             or item.get("anime_title")
             or item.get("name")
             or item.get("anilist_title")
-            or "未知作品"
         )
+        characters = item.get("character") or item.get("characters") or []
+        if not title and isinstance(characters, list) and characters:
+            first = characters[0] or {}
+            work = first.get("work") or first.get("title")
+            if work:
+                title = str(work)
+        if not title:
+            title = "未知作品"
+
         similarity = item.get("similarity") or item.get("similarity_percent")
         ep = item.get("episode") or item.get("ep")
         ts_from = item.get("from") or item.get("at") or item.get("time")
@@ -174,6 +183,33 @@ def _format_animetrace_result(data: dict[str, Any]) -> str:
             lines.append(f"  时间点：{ts_from}")
         if image:
             lines.append(f"  预览图：{image}")
+        # 角色列表（若存在）
+        if isinstance(characters, list) and characters:
+            lines.append("  角色候选：")
+            max_chars = 5
+            for i, ch in enumerate(characters[:max_chars], start=1):
+                if not isinstance(ch, dict):
+                    continue
+                work = ch.get("work") or ch.get("title") or ""
+                cname = ch.get("character") or ch.get("name") or ""
+                if work or cname:
+                    if work and cname:
+                        lines.append(f"    - {work}：{cname}")
+                    elif work:
+                        lines.append(f"    - {work}")
+                    else:
+                        lines.append(f"    - {cname}")
+            if len(characters) > max_chars:
+                lines.append(f"    （共 {len(characters)} 个角色候选，已截取前 {max_chars} 个。）")
+
+        # 附上本条结果的原始字段，方便排查实际返回结构
+        try:
+            raw_json = json.dumps(item, ensure_ascii=False, indent=2)
+            lines.append("  原始字段：")
+            for ln in raw_json.splitlines():
+                lines.append(f"    {ln}")
+        except Exception:
+            lines.append(f"  原始字段解析失败：{item}")
 
     if len(candidates) > 5:
         lines.append(f"\n（共返回 {len(candidates)} 条结果，已截取前 5 条展示。）")
@@ -199,10 +235,10 @@ async def handle_animetrace_command(event: AstrMessageEvent, config: AstrBotConf
 
     cfg = _get_animetrace_config(config)
     api_url = cfg["api_url"]
+    # 目前 AnimeTrace 接口对布尔/枚举参数校验较严格，避免因 is_multi/ai_detect 类型差异导致 400，
+    # 这里只传必需的 model 参数，其余使用服务端默认值。
     payload = {
         "model": cfg["model"],
-        "is_multi": cfg["is_multi"],
-        "ai_detect": cfg["ai_detect"],
     }
 
     data = await _call_animetrace(api_url, payload, file_field)

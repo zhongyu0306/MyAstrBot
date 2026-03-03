@@ -38,8 +38,14 @@ from .bookkeeping_utils import (
     handle_bookkeeping_delete,
 )
 from .jrys_utils import handle_jrys_command, handle_jrys_last_command
-from .ocr_utils import handle_ocr_command
-from .anime_utils import handle_animetrace_command
+from .ocr_utils import handle_ocr_command, _extract_image_from_event
+from .anime_utils import (
+    handle_animetrace_command,
+    _get_animetrace_config,
+    _prepare_file_field,
+    _call_animetrace,
+    _format_animetrace_result,
+)
 from .qianfan_search_utils import (
     _call_smart_search,
     _call_web_search,
@@ -118,6 +124,7 @@ class AllCharPlugin(Star):
                 BookkeepingSummaryTool(),
                 SmartSearchTool(),
                 WebSearchTool(),
+                AnimeTraceTool(),
             )
             logger.info(
                 "astrbot_all_char 已注册 LLM 工具：股票、天气、火车票、提醒、记账、智能搜索/网页搜索等"
@@ -221,6 +228,23 @@ class AllCharPlugin(Star):
         """
         async for result in handle_animetrace_command(event, self.config):
             yield result
+
+    @filter.llm_tool(name="anime_trace")
+    async def tool_anime_trace(self, event: AstrMessageEvent, image: str | None = None):
+        """识别动漫图片所属番剧/角色（调用 AnimeTrace）。
+
+        使用建议（给 LLM 的决策规则）：
+        - 当用户发来一张动漫截图/人物立绘，并询问「这是谁/出自哪部番/帮我搜番」时优先调用；
+        - 若用户已提供图片 URL，则作为 image 参数传入；否则直接调用，本工具会自动从消息事件中取图；
+        - 识别结果通常包含番剧标题、相似度、集数/时间点等，可在自然语言回复中进一步解释，但不要编造未返回的信息。
+
+        Args:
+            image(string): 图片的 URL 或本地路径（可选）。留空时自动从当前消息中提取第一张图片。
+        """
+        ctx_wrapper = ContextWrapper[AstrAgentContext](self.context)  # type: ignore[type-arg]
+        tool = AnimeTraceTool()
+        result = await tool.call(ctx_wrapper, image=image)
+        yield event.plain_result(str(result))
 
     # ---------------- 记账 ----------------
 
@@ -1153,3 +1177,76 @@ class WebSearchTool(FunctionTool[AstrAgentContext]):
         except Exception:
             # 如果整理失败，直接返回原始结果
             return search_text
+
+
+@dataclass
+class AnimeTraceTool(FunctionTool[AstrAgentContext]):
+    """
+    动漫图片识别 LLM 工具（AnimeTrace）。
+
+    使用建议（给 LLM 的决策规则）：
+    - 用户给出一张动漫截图/角色立绘并问「这是谁」「出自哪部番」「帮我搜番」等问题时调用；
+    - 若用户提供了图片 URL，可直接填入 image 参数；否则本工具会尝试从当前会话最近一条带图消息中取图；
+    - 结果通常包含番剧标题、相似度、集数/时间点和预览图链接，可在自然语言中转述和解释，但不要编造接口未返回的信息。
+    """
+
+    name: str = "anime_trace"
+    description: str = "识别动漫图片所属番剧、角色等信息（调用 AnimeTrace API）。"
+    parameters: dict = Field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "image": {
+                    "type": "string",
+                    "description": "要识别的图片 URL 或本地路径；留空时会自动从当前消息中提取第一张图片。",
+                },
+                # 目前服务端对布尔/枚举参数校验较严格，工具层先不暴露 is_multi/ai_detect，避免类型不兼容导致 400。
+                "model": {
+                    "type": "string",
+                    "description": "AnimeTrace 识别模型名称；不填时使用插件配置 animetrace_model。",
+                },
+            },
+            "required": [],
+        }
+    )
+
+    async def call(
+        self,
+        context: ContextWrapper[AstrAgentContext],
+        image: str | None = None,
+        model: str | None = None,
+        **kwargs,
+    ) -> ToolExecResult:
+        ctx = context.context.context
+        event = context.context.event
+        cfg = _get_effective_config(ctx, AllCharPlugin._shared_config)  # type: ignore[arg-type]
+
+        # 1. 确定图片来源：优先使用参数，其次从事件中提取
+        src = (image or "").strip()
+        if not src:
+            src = _extract_image_from_event(event) or ""
+        if not src:
+            return "未找到可识别的图片。请先发送一张动漫截图或在 image 参数中提供图片 URL/本地路径。"
+
+        # 2. 读取 AnimeTrace 配置并应用参数覆盖（仅覆盖 model，其他参数使用服务端默认）
+        anim_cfg = _get_animetrace_config(cfg)
+        if model:
+            anim_cfg["model"] = model.strip() or anim_cfg["model"]
+
+        file_field = await _prepare_file_field(src)
+        if not file_field:
+            return "图片获取失败（无法读取或下载），请检查图片是否可访问。"
+
+        # 仅传必需的 model 参数，避免 is_multi/ai_detect 类型差异导致 400。
+        payload = {
+            "model": anim_cfg["model"],
+        }
+        data = await _call_animetrace(anim_cfg["api_url"], payload, file_field)
+        if not data:
+            return "AnimeTrace 识别失败，请稍后重试或检查网络。"
+
+        text = _format_animetrace_result(data)
+        max_len = 4000
+        if len(text) > max_len:
+            text = text[:max_len] + "\n\n（结果过长，已截断显示。）"
+        return text
