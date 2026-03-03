@@ -1,0 +1,3 @@
+[submodule "Humanizer-zh"]
+	path = Humanizer-zh
+	url = https://github.com/op7418/Humanizer-zh.git
