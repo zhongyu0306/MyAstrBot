@@ -39,6 +39,7 @@ from .bookkeeping_utils import (
 )
 from .jrys_utils import handle_jrys_command, handle_jrys_last_command
 from .ocr_utils import handle_ocr_command
+from .anime_utils import handle_animetrace_command
 from .qianfan_search_utils import (
     _call_smart_search,
     _call_web_search,
@@ -208,6 +209,17 @@ class AllCharPlugin(Star):
     @filter.command("识别图片", alias={"ocr", "图片识别"})
     async def cmd_ocr(self, event: AstrMessageEvent):
         async for result in handle_ocr_command(event, self.config):
+            yield result
+
+    # ---------------- 动漫图片识别（AnimeTrace） ----------------
+
+    @filter.command("搜番", alias={"识别动漫", "番剧识别", "动漫识别"})
+    async def cmd_animetrace(self, event: AstrMessageEvent):
+        """
+        使用 AnimeTrace 识别动漫图片（番剧 / 角色 / 截图来源）。
+        请在同一条消息中附带一张图片。
+        """
+        async for result in handle_animetrace_command(event, self.config):
             yield result
 
     # ---------------- 记账 ----------------

@@ -312,6 +312,37 @@
       }
     }
   },
+  "animetrace": {
+    "description": "动漫图片识别（AnimeTrace）",
+    "hint": "使用 AnimeTrace API 识别番剧/角色等信息，文档见 https://ai.animedb.cn/zh/api-docs/ 。",
+    "type": "object",
+    "items": {
+      "animetrace_api_url": {
+        "description": "AnimeTrace 接口地址",
+        "type": "string",
+        "hint": "默认使用官方地址：https://api.animetrace.com/v1/search",
+        "default": "https://api.animetrace.com/v1/search"
+      },
+      "animetrace_model": {
+        "description": "识别模型名称",
+        "type": "string",
+        "hint": "参考 AnimeTrace 文档的模型名，如 animetrace_high_beta。",
+        "default": "animetrace_high_beta"
+      },
+      "animetrace_is_multi": {
+        "description": "返回多个候选结果",
+        "type": "bool",
+        "hint": "开启后 is_multi=1，将返回多个匹配结果；关闭则只返回最佳结果。",
+        "default": false
+      },
+      "animetrace_ai_detect": {
+        "description": "开启 AI 图检测",
+        "type": "bool",
+        "hint": "对应 AnimeTrace 的 ai_detect 参数，开启时传 1，关闭时传 2。",
+        "default": true
+      }
+    }
+  },
   "qianfan_search": {
     "description": "百度千帆智能搜索与网页搜索",
     "hint": "/智能搜索、/搜索 使用 X-Appbuilder-Authorization 鉴权；网页搜索结果可自定义交给 LLM 的提示词。",
