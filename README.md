@@ -371,4 +371,5 @@
 天气：https://github.com/ningyou8023/astrbot_plugin_nyweather
 运势：https://github.com/NINIYOYYO/astrbot_plugin_jrys
 点歌：https://github.com/Zhalslar/astrbot_plugin_music
+生图：https://github.com/muyouzhi6/astrbot_plugin_gitee_aiimg
 
