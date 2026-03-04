@@ -513,11 +513,5 @@
         "default": "请严格以当前设定的人格与口吻整理以下智能搜索结果。使用正常中文标点，避免大量星号（*）或 Markdown 符号。直接输出整理后的回答，不要编造内容。\n\n原始结果：\n{smart_search_result}"
       }
     }
-  },
-  "natural_language_legacy": {
-    "description": "（已废弃）自然语言触发相关配置，保留此块仅为兼容旧配置文件，代码中不会再读取这些字段。",
-    "hint": "如果是全新部署，可以忽略本配置块；后续版本可以安全删除整个 natural_language_legacy 节点。",
-    "type": "object",
-    "items": {}
   }
 }
