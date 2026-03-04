@@ -187,11 +187,7 @@ def _get_web_search_prompt_template(config: AstrBotConfig) -> str:
 
 
 def _get_count_file_path() -> Path:
-    try:
-        base = StarTools.get_data_dir(PLUGIN_DATA_DIR)
-    except Exception:
-        # 回退到本地 data 目录，避免因环境不完整导致功能完全不可用
-        base = Path("data") / "plugin_data" / PLUGIN_DATA_DIR
+    base = StarTools.get_data_dir(PLUGIN_DATA_DIR)
     base.mkdir(parents=True, exist_ok=True)
     return base / COUNT_FILE_NAME
 

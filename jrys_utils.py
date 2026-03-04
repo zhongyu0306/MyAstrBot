@@ -85,6 +85,10 @@ class ResourceManager:
         # 供缓存目录使用的插件名
         self.name = "astrbot_all_char_jrys"
 
+        # jrys.json 业务数据文件的持久化目录（使用 StarTools 规范数据目录）
+        self._jrys_data_dir: Path = StarTools.get_data_dir(self.name)
+        self._jrys_data_dir.mkdir(parents=True, exist_ok=True)
+
         self._http_headers = {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -369,8 +373,8 @@ class ResourceManager:
 
     def _background_cache_path_for_url(self, url: str) -> Path:
         self._ensure_storage_dirs()
-        assert self._background_cache_dir is not None
-
+        if self._background_cache_dir is None:
+            raise RuntimeError("今日运势：背景图缓存目录未初始化")
         parsed = urlparse(url)
         ext = os.path.splitext(parsed.path)[1].lower()
         if not ext or len(ext) > 10:
@@ -380,8 +384,8 @@ class ResourceManager:
 
     def _background_tmp_path_for_url(self, url: str) -> Path:
         self._ensure_storage_dirs()
-        assert self._background_tmp_dir is not None
-
+        if self._background_tmp_dir is None:
+            raise RuntimeError("今日运势：背景图临时目录未初始化")
         parsed = urlparse(url)
         ext = os.path.splitext(parsed.path)[1].lower()
         if not ext or len(ext) > 10:
@@ -577,14 +581,30 @@ class ResourceManager:
         if self.is_data_loaded:
             return self.jrys_data
 
-        jrys_path = os.path.join(self.data_dir, "jrys.json")
-
-        if not os.path.exists(jrys_path):
-            async with aiofiles.open(jrys_path, "w", encoding="utf-8") as f:
-                await f.write(json.dumps({}))
-                logger.info(f"今日运势：创建空的运势数据文件: {jrys_path}")
+        # 使用规范数据目录存放 jrys.json，并在首次使用时迁移旧文件
+        jrys_path = self._jrys_data_dir / "jrys.json"
+        legacy_path = Path(self.data_dir) / "jrys.json"
 
         try:
+            if legacy_path.exists() and not jrys_path.exists():
+                try:
+                    shutil.move(str(legacy_path), str(jrys_path))
+                    logger.info(
+                        "今日运势：已将历史运势数据文件从插件资源目录迁移到数据目录: %s -> %s",
+                        legacy_path,
+                        jrys_path,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "今日运势：迁移历史运势数据文件失败，将继续使用旧路径: %s", e
+                    )
+                    jrys_path = legacy_path
+
+            if not jrys_path.exists():
+                async with aiofiles.open(jrys_path, "w", encoding="utf-8") as f:
+                    await f.write(json.dumps({}))
+                    logger.info(f"今日运势：创建空的运势数据文件: {jrys_path}")
+
             async with aiofiles.open(jrys_path, "r", encoding="utf-8") as f:
                 content = await f.read()
                 self.jrys_data = await asyncio.to_thread(json.loads, content)
@@ -601,7 +621,7 @@ class ResourceManager:
 
     async def _save_jrys_data(self):
         """保存运势数据到 jrys.json。"""
-        jrys_path = os.path.join(self.data_dir, "jrys.json")
+        jrys_path = self._jrys_data_dir / "jrys.json"
         try:
             async with aiofiles.open(jrys_path, "w", encoding="utf-8") as f:
                 content = await asyncio.to_thread(
@@ -1149,8 +1169,6 @@ class JrysPlugin:
 
     async def jrys_last_command_handler(self, event: AstrMessageEvent):
         """处理 /jrys_last 指令，发送上一次生成的原图。"""
-        import os as _os
-
         user_id = event.get_sender_id()
         self.jrys_data = await self.resources._load_jrys_data()
         user_last_images = self.jrys_data.get("_user_last_images", {})
@@ -1161,7 +1179,7 @@ class JrysPlugin:
         last_info = user_last_images[user_id]
         path = last_info.get("path")
 
-        if not path or not _os.path.exists(path):
+        if not path or not os.path.exists(path):
             yield event.plain_result("找不到上一次生成的原图了，可能已被清理，请重新生成～")
             return
 
@@ -1171,8 +1189,6 @@ class JrysPlugin:
         """
         生成今日运势海报。
         """
-        import os as _os
-
         user_id = event.get_sender_id()
         user_name = event.get_sender_name()
 
@@ -1210,7 +1226,7 @@ class JrysPlugin:
                 if (
                     background_should_cleanup
                     and background_path
-                    and _os.path.exists(background_path)
+                    and os.path.exists(background_path)
                 ):
                     try:
                         await aiofiles.os.remove(background_path)
@@ -1273,9 +1289,8 @@ class JrysPlugin:
             logger.error(f"今日运势：生成运势图片过程中出错: {e}")
             yield event.plain_result("生成图片失败，请稍后再试～")
         finally:
-            import os as _os
 
-            if temp_file_path and _os.path.exists(temp_file_path):
+            if temp_file_path and os.path.exists(temp_file_path):
                 try:
                     await aiofiles.os.remove(temp_file_path)
                     logger.info("今日运势：成功删除临时文件")
@@ -1291,7 +1306,7 @@ class JrysPlugin:
             if (
                 background_should_cleanup
                 and background_path
-                and _os.path.exists(background_path)
+                and os.path.exists(background_path)
             ):
                 try:
                     await aiofiles.os.remove(background_path)

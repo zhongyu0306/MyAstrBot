@@ -71,10 +71,7 @@ def _parse_time_expression(base: datetime, expr: str) -> Optional[datetime]:
 
 def _get_reminder_file_path() -> Path:
     """获取简易提醒的持久化存储文件路径。"""
-    try:
-        base = StarTools.get_data_dir("astrbot_all_char")
-    except Exception:
-        base = Path("data") / "plugin_data" / "astrbot_all_char"
+    base = StarTools.get_data_dir("astrbot_all_char")
     base.mkdir(parents=True, exist_ok=True)
     return base / _REMINDER_FILE_NAME
 

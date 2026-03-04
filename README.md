@@ -366,23 +366,9 @@
 
 ---
 
- 当前阶段状态（草案）
-
-- 2026-03-01：修复 千帆智能搜索 401：智能搜索接口鉴权头由 `Authorization` 改为 `X-Appbuilder-Authorization: Bearer <API Key>`，与千帆要求一致。
-- 2026-03-01：自然语言：对以 `http://` 或 `https://` 开头的纯 URL 消息不再进行意图匹配，直接跳过，避免无意义匹配。
-- 2026-03-01：修复 自然语言股票误触发：原规则「我的(股票)?」会命中「把我的QQ号…」中的「我的」，导致误判为「股票 列表」；现改为仅当出现「自选/自选股」或「我的股票/我的自选」时才视为查自选列表。
-- 2026-03-01：修复 「/天气 武汉」等命令触发两次回复：自然语言处理器改为 `priority=-10`，在命令处理器（默认 0）之后执行，使「/天气 武汉」先命中命令、`stop_event()` 生效，不再重复走自然语言；并加强 `_has_command_prefix`，用 `message_obj.message` 首段判断是否以 `/` 开头。
-- 2026-03-01：新增 自然语言触发：在保留全部指令的前提下，对「非 / 开头」消息做意图匹配（天气/火车票/提醒/股票/Epic/运势/智能搜索/网页搜索/记账等），命中则复用对应 handler 并 `event.stop_event()` 避免 LLM 重复回复；新增 `natural_language_utils.py`、配置组 `natural_language`（`nl_enabled` 总开关及各模块开关）。
-- 2026-03-01：新增 百度千帆智能搜索 / 网页搜索：命令 `/智能搜索 <问题>`（别名 `/智能搜素`）、`/搜索 <关键词>`；鉴权为 API Key（请求头 `X-Appbuilder-Authorization: Bearer <API Key>`）；配置项 `qianfan_search_ak`；本地统计每日次数，`/智能搜索` 达 100 次、`/搜索` 达 1000 次后拒绝调用；`/搜索` 的结果会交给当前 LLM 整理后输出。
-- 2026-03-01：新增 OCR 图片识别 功能：命令 `/识别图片`（别名 `/ocr`、`/图片识别`），支持在配置中添加多个 OCR 服务商（OpenAI 兼容视觉 API）及调用链路兜底；`_conf_schema.json` 增加 `ocr` 模块（`ocr_enabled`、`ocr_chain`、`ocr_providers`）。`config_utils` 增加 `ocr` 以支持扁平化配置。
-- 2026-03-01：`_conf_schema.json` 按模块分组重写（train / sy / stock / weather / epic / jrys 各在一个 `{}` 内），写法对齐项目根目录「样例」；新增 `config_utils.ensure_flat_config` 以兼容嵌套配置，无需用户迁移旧数据。
-- 2026-02-27：定时任务模块改为简化实现，仅保留 `/提醒 <时间> <内容>`；`/rmd` / `/rmdg` 目前只返回帮助提示。
-
-- 本插件目前处于「骨架设计阶段」：
-  - 已分析原插件的 README 与 `_conf_schema.json`；
-  - 已在 `.cursor/rules/astrbot-all-char-integration.mdc` 中写入集成规则，方便在 Cursor 中长期记忆与复用；
-  - 本 `README.md` 与 `_conf_schema.json` 主要用于约定未来迁移和开发方式。
-- 后续可按模块逐个迁移实现，迁移时务必：
-  - 复用/保留原有指令和自然语言体验；
-  - 保持配置项含义一致，仅在前缀或命名上统一。
+参考功能来源
+记账：https://github.com/NONAME00X/astrbot_plugin_bookkeeping
+天气：https://github.com/ningyou8023/astrbot_plugin_nyweather
+运势：https://github.com/NINIYOYYO/astrbot_plugin_jrys
+点歌：https://github.com/Zhalslar/astrbot_plugin_music
 

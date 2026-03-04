@@ -15,11 +15,7 @@ class BookkeepingModule:
         self.context = context
         self.config = config
         self.plugin_name = "astrbot_plugin_bookkeeping"
-        try:
-            self.data_path = StarTools.get_data_dir(self.plugin_name)
-        except Exception:
-            # 回退到本地 data 目录，避免因环境不完整导致功能完全不可用
-            self.data_path = Path("data") / "plugin_data" / self.plugin_name
+        self.data_path = StarTools.get_data_dir(self.plugin_name)
         self.data_path.mkdir(parents=True, exist_ok=True)
         logger.info("记账模块已启动，数据路径: %s", self.data_path)
 

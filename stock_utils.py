@@ -1,6 +1,7 @@
 import asyncio
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 
 import aiohttp
@@ -12,10 +13,7 @@ from astrbot.api.star import Context, StarTools
 
 
 def _data_dir():
-    try:
-        return StarTools.get_data_dir("astrbot_stock")
-    except Exception:
-        return Path("data", "plugins_data", "astrbot_stock")
+    return StarTools.get_data_dir("astrbot_stock")
 
 
 def _watchlist_file():
@@ -275,8 +273,6 @@ class StockModule:
             logger.error("股票定时任务启动失败: %s", e)
 
     async def _run_reminders(self):
-        from datetime import datetime
-
         now = datetime.now()
         current_time = now.strftime("%H:%M")
         minute_key = now.strftime("%Y-%m-%d %H:%M")
