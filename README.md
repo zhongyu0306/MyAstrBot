@@ -1,375 +1,193 @@
- 多功能生活助手（astrbot_all_char）
+# 多功能生活助手（astrbot_all_char）
 
-`astrbot_all_char` 是对原 char 系列多个热门插件的整合版本，一套插件覆盖火车票查询、天气查询、股票行情、简易提醒、记账、千帆智能搜索等高频需求，统一配置、统一指令、统一维护。
+`astrbot_all_char` 是原 char 系列多个热门插件的整合版：**一套插件**覆盖火车票、天气、股票、简易提醒、记账、千帆智能/网页搜索、点歌、今日运势、OCR、动漫识别、发邮件等高频需求，**统一配置、统一指令、统一维护**。
 
-在保持原有「命令模式」兼容的基础上，本插件额外提供了一组 LLM 工具（FunctionTool + add_llm_tools），方便在自然语言对话中由 Agent 自动调用。
+- **命令模式**：所有功能均通过明确的前缀指令调用（见下方「所有指令一览」）。
+- **口语化 / Agent 调用**：插件注册了一组 LLM 工具（FunctionTool），在自然语言对话中由 Agent 自动选择并调用，无需记命令（见「口语化调用」与「已注册的 LLM 工具一览」）。
 
- 已注册的 LLM 工具一览
+---
 
-- stock_query
-  - 功能: 查询股票当前行情。
-  - 参数:
-    - `query` (string, 必填): 股票代码（如 `600519`）或名称关键字（如 `贵州茅台`）。
-  - 说明: 内部使用新浪行情源，若按名称匹配到多只股票，会返回候选列表让模型引导用户改用代码查询。
+## 一、所有指令一览
 
-- weather_query
-  - 功能: 查询城市天气。
-  - 参数:
-    - `city` (string, 必填): 城市名称，例如 `北京`。
-    - `days` (integer, 选填): 预报天数 `1-7`，缺省或小于 2 视为当天。
-  - 说明: 复用原天气模块逻辑，优先按配置的 `weather_api_url` / `weather_api_key` 请求，默认使用 `api.nycnm.cn`。
+| 模块 | 主命令及别名 | 用法示例 |
+|------|--------------|----------|
+| **火车票** | `/火车票`、`/车票`、`/查火车票`；帮助：`/火车票帮助` | `/火车票 厦门 上海` |
+| **简易提醒** | `/提醒` | `/提醒 3分钟后 喝水`、`/提醒 08:30 上班打卡` |
+| **定时任务** | `/rmd`、`/rmdg` | 兼容原 sy 插件子命令，详见帮助 |
+| **股票** | `/股票`、`/stock`、`/自选股`、`/行情` | `/股票 查询 600519`、`/股票 添加 600519`、`/股票 列表`、`/股票 提醒 09:30`、`/股票 跌到 600519 1800`、`/股票 涨到 600519 2000` 等 |
+| **天气** | `/天气`、`/天气查询`、`/查天气`；帮助：`/天气帮助` | `/天气 北京`、`/天气 北京 5` |
+| **Epic 免费游戏** | `/epic`、`/Epic免费`、`/喜加一`、`/e宝`；帮助：`/Epic帮助` | `/epic` |
+| **点歌** | `/点歌`、`/music`、`/唱歌`、`/唱` | `/点歌 青花`；返回候选后直接回复数字序号即可播放 |
+| **记账** | `记账支出`、`记账收入`、`查账统计`、`日统计`、`月统计`、`查账详情`、`按类统计`、`删除账单` | `记账支出 35 中午吃饭`、`记账收入 5000 工资`、`查账统计`、`日统计 2026-03-07`、`月统计 2026-03`、`查账详情`、`按类统计`、`删除账单 3` |
+| **今日运势** | `/jrys`、`/今日运势`、`/运势`；原图：`/jrys_last` | `/jrys` |
+| **OCR 图片识别** | `/识别图片`、`/ocr`、`/图片识别` | 发送指令并附带一张图片 |
+| **动漫/番剧识别** | `/搜番`、`/识别动漫`、`/番剧识别`、`/动漫识别` | 发送指令并附带一张动漫截图 |
+| **智能搜索** | `/智能搜索`、`/智能搜素` | `/智能搜索 今天北京天气怎么样`（千帆 ai_search，每日限 100 次） |
+| **网页搜索** | `/搜索` | `/搜索 关键词`（千帆 web_search，每日限 1000 次） |
+| **发邮件** | `/发邮件`、`/发送邮件` | `/发邮件 someone@qq.com 主题 正文内容`（需配置 QQ 邮箱与授权码） |
 
-- train_query
-  - 功能: 查询两地之间的火车票/车次信息。
-  - 参数:
-    - `departure` (string, 必填): 出发地城市或站点，例如 `厦门`。
-    - `arrival` (string, 必填): 目的地城市或站点，例如 `上海`。
-  - 说明: 复用原火车票模块的查询接口，默认使用 `https://api.lolimi.cn/API/hc/api`。
+> 约定：各模块主命令前缀不互相复用；新增别名前需检查是否与其他模块冲突。
 
-- simple_reminder
-  - 功能: 设置一个简易定时提醒（等价于命令 `/提醒`）。
-  - 参数:
-    - `time_expression` (string, 必填): 时间表达式，如 `3分钟后`、`2小时后`、`2026-02-28-08:00`、`08:30`。
-    - `text` (string, 必填): 提醒内容，例如 `喝水`、`去开会`。
-  - 说明: 使用 APScheduler 做持久化调度，消息重启后仍会按时触发。
+---
 
-- bookkeeping_add_expense
-  - 功能: 记录一笔支出，并由 LLM 自动分类。
-  - 参数:
-    - `amount` (number, 必填): 支出金额，单位元。
-    - `description` (string, 选填): 支出描述，例如 `中午吃饭`。
+## 二、口语化调用（自然语言怎么说）
 
-- bookkeeping_add_income
-  - 功能: 记录一笔收入，并由 LLM 自动分类。
-  - 参数:
-    - `amount` (number, 必填): 收入金额，单位元。
-    - `description` (string, 选填): 收入描述，例如 `工资`、`发红包`。
+在 **Agent / 技能** 对话中，用户**不用记命令**，直接说需求，大模型会自动选择并调用对应 LLM 工具。示例说法如下。
 
-- bookkeeping_summary
-  - 功能: 查看当前用户的记账总收入、总支出和余额，并给出简要 AI 财务建议。
-  - 参数: 无。
+| 你想做的事 | 可以这样说（示例） | 对应工具 |
+|------------|--------------------|----------|
+| 查股票 | 「贵州茅台现在多少钱」「查一下 600519 的行情」 | `stock_query` |
+| 查天气 | 「北京今天天气怎么样」「上海未来 5 天天气」 | `weather_query` |
+| 查火车票 | 「厦门到上海有哪几趟车」「查一下明天厦门到上海的火车」 | `train_query` |
+| 设提醒 | 「3 分钟后提醒我喝水」「明天早上 8 点半提醒我打卡」 | `simple_reminder` |
+| 记一笔支出 | 「中午吃饭花了 35」「帮我记一笔支出 50 买咖啡」 | `bookkeeping_add_expense` |
+| 记一笔收入 | 「今天发工资 5000」「收到红包 200 记一下」 | `bookkeeping_add_income` |
+| 看账本 | 「我最近花了多少钱」「帮我看看账本总体情况」 | `bookkeeping_summary` |
+| 上网查资料 | 「查一下最新的某某新闻」「帮我搜一下某某」 | `smart_search` / `web_search` |
+| 识番/识角色 | 「这张图是哪个番」「这是谁」（并带图） | `anime_trace` |
+| 点歌 | 「放一首青花」「帮我点一首夜曲 周杰伦」 | `music_play` |
+| 发邮件 | 「帮我发封邮件给 xxx@qq.com，主题是…内容是…」 | `send_email` |
 
-- smart_search
-  - 功能: 使用百度千帆智能搜索（`ai_search/chat/completions`）查询复杂问题，并交由当前会话 LLM 重新整理输出。
-  - 参数:
-    - `query` (string, 必填): 要搜索的问题或主题。
-  - 说明: 本地统计每日最多 `100` 次（`DAILY_LIMIT_SMART`），超过后会拒绝调用。
+---
 
-- web_search
-  - 功能: 使用百度千帆网页搜索（`ai_search/web_search`）查询信息，并交由当前会话 LLM 重新整理输出。
-  - 参数:
-    - `query` (string, 必填): 要搜索的关键词。
-  - 说明: 本地统计每日最多 `1000` 次（`DAILY_LIMIT_WEB`），超过后会拒绝调用。
+## 三、已注册的 LLM 工具一览
 
-- anime_trace
-  - 功能: 使用 AnimeTrace API 识别动漫图片所属番剧、角色等信息。
-  - 参数:
-    - `image` (string, 选填): 要识别的图片 URL 或本地路径；留空时会自动从当前会话中最近一条带图消息提取第一张图片。
-  - 说明: 适用于「这是谁/出自哪部番/帮我搜番」等需求，返回结果包含番剧标题、相似度、集数/时间点和预览图链接等信息。
+- **stock_query**  
+  - 功能：查询股票当前行情。  
+  - 参数：`query`（必填，string）— 股票代码如 `600519` 或名称关键字如 `贵州茅台`。  
+  - 说明：使用新浪行情源；按名称匹配到多只时返回候选列表，由模型引导用户改用代码查询。
 
-- music_play
-  - 功能: 根据歌曲名称或关键词点歌，自动选择最匹配的一首并返回播放链接。
-  - 参数:
-    - `keyword` (string, 必填): 歌曲名称或相关关键词，例如 `青花` 或 `夜曲 周杰伦`。
-  - 说明: 复用原 `astrbot_plugin_music_pro` 行为，使用柠柚点歌接口与网易云 API 获取音源，返回文本中会包含可供前端播放的音频 URL。
+- **weather_query**  
+  - 功能：查询城市天气。  
+  - 参数：`city`（必填，string）；`days`（选填，integer，1–7，缺省或 &lt;2 视为当天）。  
+  - 说明：优先使用配置的 `weather_api_url` / `weather_api_key`，默认 `api.nycnm.cn`。
 
- 与命令模式的对应关系
+- **train_query**  
+  - 功能：查询两地之间火车票/车次。  
+  - 参数：`departure`、`arrival`（必填，string），如 `厦门`、`上海`。  
+  - 说明：默认使用 `https://api.lolimi.cn/API/hc/api`。
 
-- 股票:  
-  - 命令: `/股票 查询 600519`  
-  - LLM 工具: `stock_query`（参数 `query="600519"`）
+- **simple_reminder**  
+  - 功能：设置简易定时提醒（等价于 `/提醒`）。  
+  - 参数：`time_expression`（必填，如 `3分钟后`、`08:30`、`2026-02-28-08:00`）；`text`（必填，提醒内容）。  
+  - 说明：APScheduler 持久化，重启后仍会按时触发。
 
-- 天气:  
-  - 命令: `/天气 北京 5`  
-  - LLM 工具: `weather_query`（参数 `city="北京"`, `days=5`）
+- **bookkeeping_add_expense**  
+  - 功能：记录一笔支出并由 LLM 自动分类。  
+  - 参数：`amount`（必填，number）；`description`（选填，string）。
 
-- 火车票:  
-  - 命令: `/火车票 厦门 上海`  
-  - LLM 工具: `train_query`（参数 `departure="厦门"`, `arrival="上海"`）
+- **bookkeeping_add_income**  
+  - 功能：记录一笔收入并由 LLM 自动分类。  
+  - 参数：`amount`（必填，number）；`description`（选填，string）。
 
-- 简易提醒:  
-  - 命令: `/提醒 3分钟后 喝水`  
-  - LLM 工具: `simple_reminder`（参数 `time_expression="3分钟后"`, `text="喝水"`）
+- **bookkeeping_summary**  
+  - 功能：查看当前用户记账总收入、总支出、余额及简要 AI 财务建议。  
+  - 参数：无。
 
-- 记账:  
-  - 命令: `记账支出 35 中午吃饭`  
-  - LLM 工具: `bookkeeping_add_expense`（参数 `amount=35`, `description="中午吃饭"`）
+- **smart_search**  
+  - 功能：百度千帆智能搜索（ai_search/chat/completions），结果交由当前会话 LLM 整理输出。  
+  - 参数：`query`（必填，string）。  
+  - 说明：本地每日最多 100 次（`DAILY_LIMIT_SMART`），超限拒绝。
 
-- 点歌:  
-  - 命令: `/点歌 青花`  
-  - LLM 工具: `music_play`（参数 `keyword="青花"`）
+- **web_search**  
+  - 功能：百度千帆网页搜索（ai_search/web_search），结果交由当前会话 LLM 整理输出。  
+  - 参数：`query`（必填，string）。  
+  - 说明：本地每日最多 1000 次（`DAILY_LIMIT_WEB`），超限拒绝。
 
- 在 Agent / Skill 中使用建议
+- **anime_trace**  
+  - 功能：AnimeTrace 识别动漫图片所属番剧、角色等。  
+  - 参数：`image`（选填，string）— 图片 URL 或本地路径；留空时从当前会话最近一条带图消息取第一张图。  
+  - 说明：适用于「这是谁/出自哪部番/帮我搜番」等，返回番剧标题、相似度、集数/时间点及预览链接等。
 
-- 工具发现:  
-  在构建 Agent 的工具列表时，可以直接暴露上述工具的 `name`、`description` 和 `parameters` 结构，让大模型根据自然语言自动选择合适的工具调用。
+- **music_play**  
+  - 功能：按歌曲名或关键词点歌，自动选最匹配的一首并返回播放链接。  
+  - 参数：`keyword`（必填，string），如 `青花`、`夜曲 周杰伦`。  
+  - 说明：复用原 music_pro 行为，柠柚点歌 + 网易云 API，返回文本含可播放音频 URL。
 
-- 提示词建议:  
-  在系统提示词中，可以用简短中文列出这些工具用途，例如：
+- **send_email**  
+  - 功能：使用配置的 QQ 邮箱向指定收件人发送邮件。  
+  - 参数：`to_addr`（必填，string）、`subject`（必填，string）、`body`（必填，string）。  
+  - 说明：需在插件配置中填写发件人邮箱与 QQ 邮箱授权码。
+
+---
+
+## 四、命令与 LLM 工具对应关系
+
+| 功能 | 命令示例 | LLM 工具 |
+|------|----------|----------|
+| 股票 | `/股票 查询 600519` | `stock_query` |
+| 天气 | `/天气 北京 5` | `weather_query` |
+| 火车票 | `/火车票 厦门 上海` | `train_query` |
+| 简易提醒 | `/提醒 3分钟后 喝水` | `simple_reminder` |
+| 记账支出/收入/统计 | `记账支出 35 午饭`、`查账统计` | `bookkeeping_add_expense` / `bookkeeping_add_income` / `bookkeeping_summary` |
+| 点歌 | `/点歌 青花` | `music_play` |
+| 智能/网页搜索 | `/智能搜索 …`、`/搜索 …` | `smart_search`、`web_search` |
+| 动漫识别 | `/搜番`（带图） | `anime_trace` |
+| 发邮件 | `/发邮件 收件人 主题 正文` | `send_email` |
+
+---
+
+## 五、在 Agent / Skill 中使用建议
+
+- **工具发现**：将上述工具的 `name`、`description`、`parameters` 暴露给 Agent，由大模型根据自然语言自动选工具。
+- **提示词建议**（可写入系统提示词）：
   > 你可以使用以下工具：  
-  > - `stock_query`: 查询 A 股股票行情  
-  > - `weather_query`: 查询城市天气  
-  > - `train_query`: 查询火车票车次信息  
-  > - `simple_reminder`: 帮用户设置定时提醒  
-  > - `bookkeeping_`: 帮用户记账与查看统计  
-  > - `smart_search` / `web_search`: 需要上网查资料时调用。  
-  > - `anime_trace`: 当用户给出动漫截图/角色立绘并询问来源或人物信息时调用。
+  > - `stock_query`：查询 A 股股票行情  
+  > - `weather_query`：查询城市天气  
+  > - `train_query`：查询火车票车次  
+  > - `simple_reminder`：帮用户设置定时提醒  
+  > - `bookkeeping_add_expense` / `bookkeeping_add_income` / `bookkeeping_summary`：记账与查统计  
+  > - `smart_search` / `web_search`：需要联网查资料时调用  
+  > - `anime_trace`：用户发动漫截图并问「这是谁/出自哪部番」时调用  
+  > - `music_play`：用户要点歌、放歌时调用  
+  > - `send_email`：用户要发邮件时调用  
 
-这样，大模型在理解用户自然语言意图时，就能像使用 `astrbot_plugin_payqr` 一样，自动发现并调用 `astrbot_all_char` 提供的这些技能。
+这样 Agent 在理解用户自然语言意图时，即可自动发现并调用本插件提供的这些技能。
 
- 多功能生活助手（astrbot_all_char）
+---
 
-`astrbot_all_char` 是对原 char 系列多个热门插件的整合版本，一套插件覆盖火车票查询、天气查询、股票行情、简易提醒、记账、千帆智能搜索等高频需求，统一配置、统一指令、统一维护。
+## 六、插件整合与结构说明
 
-在保持原有「命令模式」兼容的基础上，本插件额外提供了一组 LLM 工具（FunctionTool + add_llm_tools），方便在自然语言对话中由 Agent 自动调用。
+### 整合来源
 
- 已注册的 LLM 工具一览
-
-- stock_query
-  - 功能: 查询股票当前行情。
-  - 参数:
-    - `query` (string, 必填): 股票代码（如 `600519`）或名称关键字（如 `贵州茅台`）。
-  - 说明: 内部使用新浪行情源，若按名称匹配到多只股票，会返回候选列表让模型引导用户改用代码查询。
-
-- weather_query
-  - 功能: 查询城市天气。
-  - 参数:
-    - `city` (string, 必填): 城市名称，例如 `北京`。
-    - `days` (integer, 选填): 预报天数 `1-7`，缺省或小于 2 视为当天。
-  - 说明: 复用原天气模块逻辑，优先按配置的 `weather_api_url` / `weather_api_key` 请求，默认使用 `api.nycnm.cn`。
-
-- train_query
-  - 功能: 查询两地之间的火车票/车次信息。
-  - 参数:
-    - `departure` (string, 必填): 出发地城市或站点，例如 `厦门`。
-    - `arrival` (string, 必填): 目的地城市或站点，例如 `上海`。
-  - 说明: 复用原火车票模块的查询接口，默认使用 `https://api.lolimi.cn/API/hc/api`。
-
-- simple_reminder
-  - 功能: 设置一个简易定时提醒（等价于命令 `/提醒`）。
-  - 参数:
-    - `time_expression` (string, 必填): 时间表达式，如 `3分钟后`、`2小时后`、`2026-02-28-08:00`、`08:30`。
-    - `text` (string, 必填): 提醒内容，例如 `喝水`、`去开会`。
-  - 说明: 使用 APScheduler 做持久化调度，消息重启后仍会按时触发。
-
-- bookkeeping_add_expense
-  - 功能: 记录一笔支出，并由 LLM 自动分类。
-  - 参数:
-    - `amount` (number, 必填): 支出金额，单位元。
-    - `description` (string, 选填): 支出描述，例如 `中午吃饭`。
-
-- bookkeeping_add_income
-  - 功能: 记录一笔收入，并由 LLM 自动分类。
-  - 参数:
-    - `amount` (number, 必填): 收入金额，单位元。
-    - `description` (string, 选填): 收入描述，例如 `工资`、`发红包`。
-
-- bookkeeping_summary
-  - 功能: 查看当前用户的记账总收入、总支出和余额，并给出简要 AI 财务建议。
-  - 参数: 无。
-
-- smart_search
-  - 功能: 使用百度千帆智能搜索（`ai_search/chat/completions`）查询复杂问题，并交由当前会话 LLM 重新整理输出。
-  - 参数:
-    - `query` (string, 必填): 要搜索的问题或主题。
-  - 说明: 本地统计每日最多 `100` 次（`DAILY_LIMIT_SMART`），超过后会拒绝调用。
-
-- web_search
-  - 功能: 使用百度千帆网页搜索（`ai_search/web_search`）查询信息，并交由当前会话 LLM 重新整理输出。
-  - 参数:
-    - `query` (string, 必填): 要搜索的关键词。
-  - 说明: 本地统计每日最多 `1000` 次（`DAILY_LIMIT_WEB`），超过后会拒绝调用。
-
- 与命令模式的对应关系
-
-- 股票:  
-  - 命令: `/股票 查询 600519`  
-  - LLM 工具: `stock_query`（参数 `query="600519"`）
-
-- 天气:  
-  - 命令: `/天气 北京 5`  
-  - LLM 工具: `weather_query`（参数 `city="北京"`, `days=5`）
-
-- 火车票:  
-  - 命令: `/火车票 厦门 上海`  
-  - LLM 工具: `train_query`（参数 `departure="厦门"`, `arrival="上海"`）
-
-- 简易提醒:  
-  - 命令: `/提醒 3分钟后 喝水`  
-  - LLM 工具: `simple_reminder`（参数 `time_expression="3分钟后"`, `text="喝水"`）
-
-- 记账:  
-  - 命令: `记账支出 35 中午吃饭`  
-  - LLM 工具: `bookkeeping_add_expense`（参数 `amount=35`, `description="中午吃饭"`）
-
- 在 Agent / Skill 中使用建议
-
-- 工具发现:  
-  在构建 Agent 的工具列表时，可以直接暴露上述工具的 `name`、`description` 和 `parameters` 结构，让大模型根据自然语言自动选择合适的工具调用。
-
-- 提示词建议:  
-  在系统提示词中，可以用简短中文列出这些工具用途，例如：
-  > 你可以使用以下工具：  
-  > - `stock_query`: 查询 A 股股票行情  
-  > - `weather_query`: 查询城市天气  
-  > - `train_query`: 查询火车票车次信息  
-  > - `simple_reminder`: 帮用户设置定时提醒  
-  > - `bookkeeping_`: 帮用户记账与查看统计  
-  > - `smart_search` / `web_search`: 需要上网查资料时调用。
-
-这样，大模型在理解用户自然语言意图时，就能像使用 `astrbot_plugin_payqr` 一样，自动发现并调用 `astrbot_all_char` 提供的这些技能。
-
- astrbot_all_char 多功能合集插件（char 系列）
-
-整合以下独立插件到一个统一插件中，便于统一维护与配置：
-
-- 火车票查询：原 `astrbot_plugin_train`
-- AI 智能定时任务：原 `astrbot_plugin_sy`
-- 股票行情与自选股：原 `astrbot_plugin_stock`
-- 智能天气：原 `astrbot_plugin_nyweather_char`
-- Epic 免费游戏（喜加一）：原 `astrbot_plugin_Epicfell_char`
-- 日常记账：原 `astrbot_plugin_bookkeeping`
+- 火车票：原 `astrbot_plugin_train`
+- 智能定时任务：原 `astrbot_plugin_sy`
+- 股票与自选股：原 `astrbot_plugin_stock`
+- 天气：原 `astrbot_plugin_nyweather_char`
+- Epic 免费游戏：原 `astrbot_plugin_Epicfell_char`
+- 记账：原 `astrbot_plugin_bookkeeping`
 - 今日运势：原 `astrbot_plugin_jrys`
-- OCR 图片识别：调用视觉/多模态模型识别图片中的文字，支持多服务商与调用链路兜底
-- 百度千帆智能搜索 / 网页搜索：`/智能搜索` 调用千帆 ai_search 对话接口；`/搜索` 调用网页搜索后将结果交给当前 LLM 整理输出
-  - 点歌模块：基于原 `astrbot_plugin_music_pro`，提供 `/点歌` 命令与 `music_play` LLM 工具，通过柠柚点歌接口与网易云 API 播放歌曲。
+- 点歌：原 `astrbot_plugin_music_pro`
+- OCR：调用视觉/多模态模型识别图中文字，支持多服务商与兜底
+- 千帆：`/智能搜索`（ai_search 对话）、`/搜索`（web_search + 当前 LLM 整理）
+- 动漫识别：AnimeTrace API
+- 发邮件：QQ 邮箱 SMTP
 
-本仓库当前阶段主要是设计统一结构、配置 schema 与维护规范，后续将逐步迁移具体代码逻辑进来。  
-当前版本仅保留指令模式，不再支持自然语言触发，所有功能均通过明确的命令前缀调用，便于与 MCP 等指令/工具体系集成。
+本插件**不**对「非 `/` 开头」的普通消息做意图识别；所有功能通过**命令**或 **Agent 内 LLM 工具**调用，便于与 MCP 等指令/工具体系集成。
 
----
+### 目录与代码结构
 
- 功能与指令规划（仅指令模式）
+- `main.py`：插件元信息、指令路由注册、LLM 工具注册，业务逻辑下沉到 utils。
+- `train_utils.py`、`sy_scheduler_utils.py`、`stock_utils.py`、`weather_utils.py`、`epic_utils.py`、`bookkeeping_utils.py`、`jrys_utils.py`、`ocr_utils.py`、`qianfan_search_utils.py`、`music_utils.py`、`anime_utils.py`、`email_utils.py`：各功能实现。
+- 新增功能请优先新增独立 `xxx_utils.py`，并在本 README「已注册的 LLM 工具一览」中补充说明；同时提供命令入口与至少一个 LLM 工具（FunctionTool）封装。
 
-- 火车票模块  
-  - 主命令前缀：`/火车票`（或沿用原有别名，迁移时统一整理）。
+### 配置统一（_conf_schema.json）
 
-- 定时任务模块（sy）  
-  - 推荐命令：`/提醒 <时间> <内容>`，例如：`/提醒 3分钟后 喝水`、`/提醒 08:30 上班打卡`。  
-  - 高级命令保持与原插件一致：`/rmd`（提醒/任务/指令任务）、`/rmdg`（远程群管理）。  
-  - 如需配合 LLM 工具调用，可按原插件风格迁移；自然语言触发可作为后续优化。
+- 仅保留一个 `_conf_schema.json`，按模块分组：`train`、`sy`、`stock`、`weather`、`epic`、`jrys`、`ocr`、`qianfan_search`、`music`、邮件等。
+- 字段使用模块前缀（如 `train_`、`weather_`），详见同目录 `_conf_schema.json`。
+- 今日运势资源：将原 jrys 插件的 `backgroundFolder` 与 `font` 拷贝到 `astrbot_all_char/jrys_assets/` 下。
 
-- 股票模块  
-  - 主命令：`/股票`、`/stock`（及别名：自选股、行情）。
+### 文档与更新规范
 
-- 天气模块  
-  - 主命令：`/天气`、`/nyweather`、`/天气查询`、`/查天气`。
-
-- Epic 免费游戏模块  
-  - 主命令：`/epic`、`/Epic免费`、`/喜加一`、`/e宝`。
-
-- 点歌模块  
-  - 主命令：`/点歌`（别名：`music`、`唱歌`、`唱`），用法：`/点歌 <歌曲名/关键词>`，例如：`/点歌 青花`。  
-  - 在返回候选列表后，直接回复对应的数字即可播放该歌曲；若使用 Agent 工具调用，可使用 `music_play` 直接按关键词点歌。
-
-- 记账模块  
-  - 命令均为中文前缀：`记账支出`、`记账收入`、`查账统计`、`日统计`、`月统计`、`查账详情`、`按类统计`、`删除账单`。  
-  - 以命令为主，内部会按需调用 LLM 做自动分类和财务建议。
-
-- 今日运势模块  
-  - 主命令：`/jrys`，别名：`/今日运势`、`/运势`。  
-  - 生成今日运势图片，是否启用关键词触发与节假日爆率由 `jrys_` 配置控制。  
-  - 资源说明：请将原 `astrbot_plugin_jrys-main` 下的 `backgroundFolder` 与 `font` 目录拷贝到 `astrbot_all_char/jrys_assets/` 下（保持同名子目录），打包时只需要带上 `astrbot_all_char` 即可正常出图。
-
-- OCR 图片识别模块  
-  - 主命令：`/识别图片`，别名：`/ocr`、`/图片识别`。  
-  - 发送指令并附带一张图片，由配置的视觉/多模态 API 识别图中文字。  
-  - 配置：在 ocr 中只需添加「OCR 服务商」，每项填 API 地址、API Key、模型名称；可添加多个，按顺序尝试。
-
-- 百度千帆智能搜索 / 网页搜索模块  
-  - `/智能搜索 <问题>`：调用千帆 `ai_search/chat/completions` 获取结果，再交给当前会话的 LLM 整理后输出（人格 + 正常标点，避免大量）。本地统计每日最多 100 次，达上限后不再允许调用。  
-  - `/搜索 <关键词>`：调用千帆 `ai_search/web_search` 获取网页结果，再将结果交给当前会话的 LLM 整理后输出。本地统计每日最多 1000 次，达上限后不再允许调用。  
-  - 统计文件：`data/plugin_data/astrbot_all_char/qianfan_search_daily.json`，按日期记录当日已用次数，次日自动重新计数。  
-  - 配置：在 qianfan_search 中填写 千帆 API Key（鉴权头为 `X-Appbuilder-Authorization: Bearer <API Key>`）；可选 智能搜索交给 LLM 的提示词（`qianfan_search_smart_prompt`，占位符 `{smart_search_result}`）；可选 网页搜索交给 LLM 的提示词（`qianfan_search_web_prompt`，占位符 `{query}`、`{search_results}`）。默认提示词已要求使用当前人格与正常中文标点。
-
-- （已移除）自然语言触发  
-  - 早期设计中支持对「非 / 开头」消息做意图匹配并复用各模块逻辑；为适配 MCP 等基于指令/工具的调用方式，当前版本已彻底移除相关代码，仅保留指令调用。
-
-> 约定：在 `astrbot_all_char` 中，以上每个模块的主命令前缀不得互相复用；新增别名前需要检查是否与其他模块冲突。
+- 功能/配置/指令变更须同步更新本 README。
+- 更新时建议注明：日期与版本、涉及模块、是否改动 `_conf_schema.json`、是否需要用户迁移数据或重配。
 
 ---
 
- 目录与代码结构规划
+## 参考来源
 
-建议的核心文件与模块划分如下（后续迁移代码时遵守）：
-
-- `main.py`
-  - 只负责：插件元信息、指令路由注册、基础初始化。
-  - 不直接堆业务逻辑，逻辑全部下沉到 utils 或子模块。
-- `train_utils.py`
-  - 火车票查询 API 封装、指令解析（自然语言入口可选，不要求立刻实现）。
-- `sy_scheduler_utils.py`
-  - 定时任务添加/删除/列表、远程群管理、APScheduler 调度封装。
-- `stock_utils.py`
-  - 新浪行情查询、自选股增删查、定时提醒逻辑（已移除 AkShare 依赖）。
-- `weather_utils.py`
-  - 天气 API 请求、城市解析（自然语言触发逻辑为增量需求）。
-- `epic_utils.py`
-  - Epic 免费游戏查询、订阅/取消订阅、定时推送。
-- `bookkeeping_utils.py`
-  - 记账逻辑（支出/收入记录、统计、AI 建议），统一由中文命令触发。
-- `jrys_utils.py`
-  - 今日运势图片生成逻辑的桥接层，统一由 `/jrys` 系列命令触发。
-- `ocr_utils.py`
-  - OCR 图片识别：从消息中取图，按配置的调用链路请求视觉 API，返回识别文字。
-- `qianfan_search_utils.py`
-  - 百度千帆：鉴权、`/智能搜索`（千帆智能搜索 + 当前 LLM 整理）、`/搜索`（web_search + 当前 LLM 整理）。
-- `natural_language_utils.py`
-  - 自然语言意图匹配与统一入口：天气/火车票/提醒/股票/Epic/运势/智能搜索/网页搜索/记账等；命中后复用对应 handler 并建议终止事件传播。
-
-> 开发规范（LLM Tool 一致性）  
-> - 每新增一类功能模块（如新的查询/识别/工具服务），应同时提供：  
->   - 对应的命令入口（`@filter.command`）  
->   - 至少一个 LLM 工具封装：  
->     - `@filter.llm_tool` 事件级入口（可选，用于在对话中直接调用）；  
->     - 一个 `FunctionTool` 子类（如 `XXXTool`），并在插件初始化时通过 `context.add_llm_tools(...)` 注册，包含详细的参数 schema 与「使用建议（给 LLM 的决策规则）」文档注释。  
-> - 新增功能时，请在本 `README.md` 的「已注册的 LLM 工具一览」中同步补充对应工具的说明，保持文档与实现一致。
-
-后续如需新增功能模块，请优先新增独立的 `xxx_utils.py` 或子包，而不是在 `main.py` 中继续堆代码。
-
----
-
- 配置统一：_conf_schema.json 约定
-
-- `astrbot_all_char` 目录下只保留一个 `_conf_schema.json`，整合所有子功能的配置项。
-- 结构：按功能模块分组，每个模块一个顶层对象（与项目根目录「样例」写法一致）：
-- `train`：火车票查询（`train_api_url`、`train_default_format`）
-  - `sy`：智能定时任务（会话隔离、白名单、上下文、@ 功能、cron 等）
-  - `stock`：股票与自选股（`stock_reminder_timezone`）
-  - `weather`：天气查询（API 地址、密钥、返回格式）
-  - `epic`：Epic 免费游戏（API、定时推送、订阅会话等）
-  - `jrys`：今日运势（关键词触发、节假日爆率、缓存等）
-  - `ocr`：图片文字识别（`ocr_enabled`、`ocr_providers` 服务商，每项仅 API 地址 / Key / 模型名称）
-- `qianfan_search`：百度千帆智能搜索与网页搜索（`qianfan_search_ak`；可选 `qianfan_search_smart_prompt` 智能搜索 LLM 提示词、`qianfan_search_web_prompt` 网页搜索 LLM 提示词）
-  - `music`：点歌与音乐播放（`music_apikey`、`music_api_url`、`music_quality`、`music_search_limit`）
-- 配置项仍使用模块前缀命名（如 `train_`、`sy_`、`weather_` 等），避免冲突。
-- 若框架按嵌套存储配置，插件通过 `config_utils.ensure_flat_config` 提供扁平化视图，业务代码无需修改。
-- 每个字段的 `description` / `hint` 中注明来源模块与用途，方便从原插件追溯。
-
-详细字段请查看同目录下的 `_conf_schema.json`。
-
----
-
- 文档与更新规范（重要）
-
-- 在 `astrbot_all_char` 目录下，本 `README.md` 视为必需文档：
-  - 每一次功能更新、配置变更或指令变化，都必须同步更新本 `.md` 文档。
-  - 建议在下方维护一个简单的「更新记录」小节。
-- 如后续新增 `CHANGELOG.md`，同样需要在每次更新时维护。
-
- 更新时建议写清楚：
-
-- 更新日期、版本号（如有）。
-- 影响到的模块（火车、定时任务、股票、天气、Epic 等）。
-- 是否改动 `_conf_schema.json` 中的配置项名/默认值。
-- 是否需要用户迁移旧数据或重新配置。
-
----
-
-参考功能来源
-记账：https://github.com/NONAME00X/astrbot_plugin_bookkeeping
-天气：https://github.com/ningyou8023/astrbot_plugin_nyweather
-运势：https://github.com/NINIYOYYO/astrbot_plugin_jrys
-点歌：https://github.com/Zhalslar/astrbot_plugin_music
-生图：https://github.com/muyouzhi6/astrbot_plugin_gitee_aiimg
-
+- 记账：https://github.com/NONAME00X/astrbot_plugin_bookkeeping  
+- 天气：https://github.com/ningyou8023/astrbot_plugin_nyweather  
+- 运势：https://github.com/NINIYOYYO/astrbot_plugin_jrys  
+- 点歌：https://github.com/Zhalslar/astrbot_plugin_music  
+- 生图：https://github.com/muyouzhi6/astrbot_plugin_gitee_aiimg  

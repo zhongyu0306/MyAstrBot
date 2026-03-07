@@ -513,5 +513,38 @@
         "default": "请严格以当前设定的人格与口吻整理以下智能搜索结果。使用正常中文标点，避免大量星号（*）或 Markdown 符号。直接输出整理后的回答，不要编造内容。\n\n原始结果：\n{smart_search_result}"
       }
     }
+  },
+  "email": {
+    "description": "邮件发送（QQ 邮箱）",
+    "hint": "使用 QQ 邮箱 SMTP 发送邮件，需在 QQ 邮箱设置 -> 账户 -> POP3/IMAP 服务 中开启并获取授权码（非登录密码）。",
+    "type": "object",
+    "items": {
+      "email_sender": {
+        "description": "发件人 QQ 邮箱",
+        "type": "string",
+        "hint": "用于发送邮件的 QQ 邮箱地址，例如 123456789@qq.com。",
+        "obvious_hint": true,
+        "default": ""
+      },
+      "email_auth_code": {
+        "description": "QQ 邮箱授权码",
+        "type": "string",
+        "hint": "在 QQ 邮箱网页版 -> 设置 -> 账户 -> POP3/IMAP 服务 中开启服务后获取的授权码，不是 QQ 登录密码。",
+        "obvious_hint": true,
+        "default": ""
+      },
+      "email_smtp_host": {
+        "description": "SMTP 服务器",
+        "type": "string",
+        "hint": "QQ 邮箱使用 smtp.qq.com，一般无需修改。",
+        "default": "smtp.qq.com"
+      },
+      "email_smtp_port": {
+        "description": "SMTP 端口",
+        "type": "string",
+        "hint": "QQ 邮箱 SSL 为 465，TLS 为 587。",
+        "default": "465"
+      }
+    }
   }
 }

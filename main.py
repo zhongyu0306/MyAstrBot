@@ -63,6 +63,7 @@ from .music_utils import (
     handle_music_number_selection,
     llm_play_music_by_keyword,
 )
+from .email_utils import handle_send_email_command, send_email_sync, _get_email_config as get_email_config
 
 
 def _get_effective_config(ctx: Context, plugin_config: AstrBotConfig | None) -> AstrBotConfig | dict:
@@ -131,6 +132,7 @@ class AllCharPlugin(Star):
                 WebSearchTool(),
                 AnimeTraceTool(),
                 MusicPlayTool(),
+                SendEmailTool(),
             )
             logger.info(
                 "astrbot_all_char 已注册 LLM 工具：股票、天气、火车票、提醒、记账、智能搜索/网页搜索等"
@@ -322,6 +324,17 @@ class AllCharPlugin(Star):
         /搜索 <关键词>：千帆网页搜索后由当前 LLM 整理输出。每日限 1000 次。
         """
         async for result in handle_web_search_command(event, self.context, self.config):
+            yield result
+
+    # ---------------- 邮件发送（QQ 邮箱） ----------------
+
+    @filter.command("发邮件", alias={"发送邮件"})
+    async def cmd_send_email(self, event: AstrMessageEvent):
+        """
+        /发邮件 <收件人邮箱> <主题> <正文>
+        使用 QQ 邮箱发送邮件，需在插件配置中填写发件人邮箱与授权码。
+        """
+        async for result in handle_send_email_command(event, self.config):
             yield result
 
     # ---------------- LLM Tools（供 AI 自动调用） ----------------
@@ -620,6 +633,26 @@ class AllCharPlugin(Star):
         ctx_wrapper = ContextWrapper[AstrAgentContext](self.context)  # type: ignore[type-arg]
         tool = MusicPlayTool()
         result = await tool.call(ctx_wrapper, event=event, keyword=keyword)
+        yield event.plain_result(str(result))
+
+    @filter.llm_tool(name="send_email")
+    async def tool_send_email(
+        self,
+        event: AstrMessageEvent,
+        to_addr: str,
+        subject: str,
+        body: str,
+    ):
+        """发送邮件到指定收件人（使用配置的 QQ 邮箱与授权码）。
+
+        Args:
+            to_addr(string): 收件人邮箱地址。
+            subject(string): 邮件主题。
+            body(string): 邮件正文。
+        """
+        ctx_wrapper = ContextWrapper[AstrAgentContext](self.context)  # type: ignore[type-arg]
+        tool = SendEmailTool()
+        result = await tool.call(ctx_wrapper, to_addr=to_addr, subject=subject, body=body)
         yield event.plain_result(str(result))
 
 
@@ -1331,3 +1364,61 @@ class MusicPlayTool(FunctionTool[AstrAgentContext]):
         real_event = event or context.context.event
         text = await llm_play_music_by_keyword(ctx, cfg, keyword, event=real_event)
         return text
+
+
+@dataclass
+class SendEmailTool(FunctionTool[AstrAgentContext]):
+    """
+    使用配置的 QQ 邮箱发送邮件的 LLM 工具。
+    """
+
+    name: str = "send_email"
+    description: str = "向指定收件人发送邮件，需要主题和正文。发件人使用插件配置的 QQ 邮箱与授权码。"
+    parameters: dict = Field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "to_addr": {
+                    "type": "string",
+                    "description": "收件人邮箱地址。",
+                },
+                "subject": {
+                    "type": "string",
+                    "description": "邮件主题。",
+                },
+                "body": {
+                    "type": "string",
+                    "description": "邮件正文内容。",
+                },
+            },
+            "required": ["to_addr", "subject", "body"],
+        }
+    )
+
+    async def call(
+        self,
+        context: ContextWrapper[AstrAgentContext],
+        to_addr: str,
+        subject: str,
+        body: str,
+        **kwargs,
+    ) -> ToolExecResult:
+        ctx = context.context.context
+        cfg = _get_effective_config(ctx, AllCharPlugin._shared_config)  # type: ignore[arg-type]
+        sender = get_email_config(cfg, "email_sender", "")
+        auth_code = get_email_config(cfg, "email_auth_code", "")
+        if not sender or not auth_code:
+            return "未配置发件人邮箱或 QQ 邮箱授权码，请在插件配置的「邮件」中填写。"
+        to_addr = (to_addr or "").strip()
+        if not to_addr:
+            return "请提供收件人邮箱地址。"
+        ok, msg = send_email_sync(
+            sender=sender,
+            auth_code=auth_code,
+            to_addrs=[to_addr],
+            subject=(subject or "").strip() or "（无主题）",
+            body=(body or "").strip() or "",
+            smtp_host=get_email_config(cfg, "email_smtp_host", "smtp.qq.com"),
+            smtp_port=int(get_email_config(cfg, "email_smtp_port", "465") or "465"),
+        )
+        return msg
