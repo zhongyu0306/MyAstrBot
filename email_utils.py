@@ -1,12 +1,19 @@
 # 邮件发送（QQ 邮箱 SMTP + 授权码）
+from __future__ import annotations
+
 import re
 import smtplib
 import ssl
 from email.mime.text import MIMEText
 from email.utils import formataddr
+from typing import AsyncIterator
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent
+from astrbot.api.star import Context
+
+# 匹配常见邮箱地址（含 qq.com、163.com 等）
+EMAIL_PATTERN = re.compile(r"[^\s@]+@[^\s@]+\.[^\s@]+")
 
 
 def _get_email_config(config: AstrBotConfig, key: str, default: str = ""):
@@ -150,3 +157,80 @@ async def handle_send_email_command(event: AstrMessageEvent, config: AstrBotConf
         smtp_port=int(_get_email_config(config, "email_smtp_port", "465") or "465"),
     )
     yield event.plain_result(msg)
+
+
+async def handle_email_intent(
+    event: AstrMessageEvent,
+    context: Context,
+    config: AstrBotConfig,
+) -> AsyncIterator:
+    """
+    当消息中同时包含「邮件」和邮箱地址时，用 LLM 根据用户意图生成邮件主题与正文并发送。
+    不处理已以 /发邮件、/发送邮件 开头的命令（交给 handle_send_email_command）。
+    """
+    raw = (event.get_message_str() or "").strip()
+    if "邮件" not in raw:
+        return
+    # 排除显式命令，交给命令处理器
+    for prefix in ("/发邮件", "/发送邮件", "发邮件 ", "发送邮件 "):
+        if raw.startswith(prefix) or raw.strip().startswith(prefix.strip()):
+            return
+    match = EMAIL_PATTERN.search(raw)
+    if not match:
+        return
+    to_addr = match.group(0).strip()
+    sender = _get_email_config(config, "email_sender", "")
+    auth_code = _get_email_config(config, "email_auth_code", "")
+    if not sender or not auth_code:
+        yield event.plain_result(
+            "未配置发件人邮箱或 QQ 邮箱授权码，请在插件配置的「邮件」中填写后再试。"
+        )
+        event.stop_event()
+        return
+
+    umo = getattr(event, "unified_msg_origin", None) or ""
+    try:
+        provider_id = await context.get_current_chat_provider_id(umo=umo)
+    except Exception as e:
+        logger.warning("获取当前会话 LLM 失败，无法生成邮件内容: %s", e)
+        yield event.plain_result("当前无法使用 LLM 生成邮件内容，请用命令：/发邮件 收件人 主题 正文")
+        event.stop_event()
+        return
+
+    prompt = (
+        "用户希望把某些内容发到邮箱，收件人已确定为："
+        + to_addr
+        + "。用户原话："
+        + raw
+        + "\n\n请根据用户意图生成一封邮件的主题和正文。"
+        "严格按以下格式回复，不要其他说明或括号注释：\n"
+        "第一行：邮件主题（一句话，简短）\n"
+        "从第二行起：邮件正文（可多行，纯文本）。"
+    )
+    try:
+        llm_resp = await context.llm_generate(
+            chat_provider_id=provider_id,
+            prompt=prompt,
+        )
+    except Exception as e:
+        logger.exception("LLM 生成邮件内容失败: %s", e)
+        yield event.plain_result("生成邮件内容时出错，请用命令：/发邮件 收件人 主题 正文")
+        event.stop_event()
+        return
+
+    text = (getattr(llm_resp, "completion_text", None) or "").strip()
+    lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+    subject = (lines[0] or "（无主题）").strip()[:200]
+    body = "\n".join(lines[1:]).strip() if len(lines) > 1 else (lines[0] or "")
+
+    ok, msg = send_email_sync(
+        sender=sender,
+        auth_code=auth_code,
+        to_addrs=[to_addr],
+        subject=subject,
+        body=body,
+        smtp_host=_get_email_config(config, "email_smtp_host", "smtp.qq.com"),
+        smtp_port=int(_get_email_config(config, "email_smtp_port", "465") or "465"),
+    )
+    yield event.plain_result(msg)
+    event.stop_event()

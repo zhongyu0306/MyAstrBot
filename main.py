@@ -63,7 +63,12 @@ from .music_utils import (
     handle_music_number_selection,
     llm_play_music_by_keyword,
 )
-from .email_utils import handle_send_email_command, send_email_sync, _get_email_config as get_email_config
+from .email_utils import (
+    handle_send_email_command,
+    handle_email_intent,
+    send_email_sync,
+    _get_email_config as get_email_config,
+)
 
 
 def _get_effective_config(ctx: Context, plugin_config: AstrBotConfig | None) -> AstrBotConfig | dict:
@@ -135,7 +140,7 @@ class AllCharPlugin(Star):
                 SendEmailTool(),
             )
             logger.info(
-                "astrbot_all_char 已注册 LLM 工具：股票、天气、火车票、提醒、记账、智能搜索/网页搜索等"
+                "astrbot_all_char 已注册 LLM 工具：股票、天气、火车票、提醒、记账、智能搜索/网页搜索、动漫识别、点歌、发邮件等"
             )
         except Exception as e:
             logger.error("astrbot_all_char 注册 LLM 工具失败: %s", e)
@@ -335,6 +340,14 @@ class AllCharPlugin(Star):
         使用 QQ 邮箱发送邮件，需在插件配置中填写发件人邮箱与授权码。
         """
         async for result in handle_send_email_command(event, self.config):
+            yield result
+
+    @filter.regex(r"邮件", priority=100)
+    async def cmd_email_intent(self, event: AstrMessageEvent):
+        """
+        检测到消息含「邮件」且含邮箱地址时：用 LLM 根据用户意图生成主题与正文并发送，不依赖 Agent 是否调用工具。
+        """
+        async for result in handle_email_intent(event, self.context, self.config):
             yield result
 
     # ---------------- LLM Tools（供 AI 自动调用） ----------------
@@ -645,10 +658,10 @@ class AllCharPlugin(Star):
     ):
         """发送邮件到指定收件人（使用配置的 QQ 邮箱与授权码）。
 
+        禁止：仅在回复中说「已发送/发过去了」而不调用本工具——那样用户收不到邮件。必须实际调用 send_email 传入 to_addr、subject、body。
         使用建议（给 LLM 的决策规则）：
-        - 当用户要求「把某内容发到/发送到 xxx@qq.com 邮件」「发到我邮箱」等时，必须调用本工具真正发送邮件，不能只在回复中说「已发送」而不调用工具。
-        - 先整理好要发送的正文内容，再调用本工具传入 to_addr（收件人邮箱）、subject（主题）、body（正文）。
-        - 若用户先要求搜索或整理内容再发邮件，应先完成搜索/整理，再调用本工具将结果作为 body 发送。
+        - 用户说「发到 xxx@qq.com」「发送到 xxx 邮件」「发到我邮箱」时，必须先查/整理好内容，再调用本工具发送；不得只回复「已经发送了」却不调用工具。
+        - 参数：to_addr=用户给的邮箱，subject=简短主题，body=要发送的完整正文（如天气内容、快闪店汇总等）。
 
         Args:
             to_addr(string): 收件人邮箱地址，例如 1102025067@qq.com。
@@ -1379,7 +1392,7 @@ class SendEmailTool(FunctionTool[AstrAgentContext]):
 
     name: str = "send_email"
     description: str = (
-        "向指定收件人发送邮件（QQ 邮箱）。当用户要求「把某内容发到/发送到 xxx@qq.com 邮件」或「发到我邮箱」时，必须调用本工具真正发送，不能只在文字中说已发送。参数：to_addr 收件人邮箱、subject 主题、body 正文。"
+        "向指定收件人发送邮件（QQ 邮箱）。用户要求「发到/发送到 xxx@qq.com 邮件」时，必须调用本工具真正发信；禁止只回复「已发送」却不调用（否则用户收不到）。参数：to_addr 收件人邮箱、subject 主题、body 正文。"
     )
     parameters: dict = Field(
         default_factory=lambda: {
