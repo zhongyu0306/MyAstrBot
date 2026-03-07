@@ -342,10 +342,10 @@ class AllCharPlugin(Star):
         async for result in handle_send_email_command(event, self.config):
             yield result
 
-    @filter.regex(r"邮件", priority=100)
+    @filter.regex(r"邮件", priority=9999)
     async def cmd_email_intent(self, event: AstrMessageEvent):
         """
-        检测到消息含「邮件」且含邮箱地址时：用 LLM 根据用户意图生成主题与正文并发送，不依赖 Agent 是否调用工具。
+        检测到消息含「邮件」且含邮箱地址时优先处理：用 LLM 生成主题与正文并发送，避免被主对话抢先回复。
         """
         async for result in handle_email_intent(event, self.context, self.config):
             yield result

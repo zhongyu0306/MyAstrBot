@@ -188,13 +188,16 @@ async def handle_email_intent(
         event.stop_event()
         return
 
+    # 立即拦截事件，避免主对话/Agent 也处理本条消息并回复「已发送」
+    event.stop_event()
+    logger.info("[email_intent] 检测到邮件+邮箱，开始处理 to_addr=%s", to_addr)
+
     umo = getattr(event, "unified_msg_origin", None) or ""
     try:
         provider_id = await context.get_current_chat_provider_id(umo=umo)
     except Exception as e:
         logger.warning("获取当前会话 LLM 失败，无法生成邮件内容: %s", e)
         yield event.plain_result("当前无法使用 LLM 生成邮件内容，请用命令：/发邮件 收件人 主题 正文")
-        event.stop_event()
         return
 
     prompt = (
@@ -215,7 +218,6 @@ async def handle_email_intent(
     except Exception as e:
         logger.exception("LLM 生成邮件内容失败: %s", e)
         yield event.plain_result("生成邮件内容时出错，请用命令：/发邮件 收件人 主题 正文")
-        event.stop_event()
         return
 
     text = (getattr(llm_resp, "completion_text", None) or "").strip()
@@ -233,4 +235,3 @@ async def handle_email_intent(
         smtp_port=int(_get_email_config(config, "email_smtp_port", "465") or "465"),
     )
     yield event.plain_result(msg)
-    event.stop_event()
