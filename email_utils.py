@@ -215,9 +215,12 @@ async def _generate_and_send_email(
     yield event.plain_result(msg)
 
 
-# 匹配「发邮件到 / 发到邮箱 / 发送到邮箱」+ 邮箱 + 至少一个内容字符（可从整条消息任意位置匹配）
+# 句首「任意称呼 + 逗号/空格」可去掉，便于命中命令（不写死具体名字）
+STRIP_CALL_PREFIX = re.compile(r"^\s*[^\s，,]+[，,]\s*")
+
+# 匹配「发邮件到 / 发到邮箱 / 发送到邮箱 / 发送邮件到 / 发送邮件 到」+ 邮箱 + 内容（可从整条消息任意位置匹配）
 SEND_TO_EMAIL_PATTERN = re.compile(
-    r"(发邮件到|发到邮箱|发送到邮箱)\s+([^\s@]+@[^\s@]+\.[^\s@]+)\s+(.+)",
+    r"(发邮件到|发到邮箱|发送到邮箱|发送邮件\s*到)\s+([^\s@]+@[^\s@]+\.[^\s@]+)\s+(.+)",
     re.DOTALL,
 )
 
@@ -232,7 +235,9 @@ async def handle_send_email_to_command(
     命令形式，优先级高于主对话，能稳定触发。
     """
     raw = (event.get_message_str() or "").strip()
-    for prefix in ("/发邮件到", "发邮件到", "发到邮箱", "发送到邮箱"):
+    # 去掉句首「任意称呼+逗号/空格」，方便命中命令（不写死名字，谁称呼都能用）
+    raw = STRIP_CALL_PREFIX.sub("", raw).strip()
+    for prefix in ("/发邮件到", "发邮件到", "发到邮箱", "发送到邮箱", "发送邮件到", "发送邮件 到"):
         if raw.startswith(prefix):
             raw = raw[len(prefix) :].strip()
             break

@@ -353,7 +353,7 @@ class AllCharPlugin(Star):
         async for result in handle_send_email_to_command(event, self.context, self.config):
             yield result
 
-    @filter.regex(r"(?:发邮件到|发到邮箱|发送到邮箱)\s+[^\s@]+@[^\s@]+\.[^\s@]+\s+.+", priority=9999)
+    @filter.regex(r"(?:发邮件到|发到邮箱|发送到邮箱|发送邮件\s*到)\s+[^\s@]+@[^\s@]+\.[^\s@]+\s+.+", priority=9999)
     async def cmd_send_email_to_in_message(self, event: AstrMessageEvent):
         """
         消息任意位置出现「发邮件到 邮箱 内容」或「发到邮箱 邮箱 内容」时解析并发信（如：xxx，发邮件到 xxx@qq.com 今天晚饭）。
