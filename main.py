@@ -71,6 +71,12 @@ from .email_utils import (
     send_email_sync,
     _get_email_config as get_email_config,
 )
+from .email_subscription_utils import (
+    init_email_subscription_center,
+    handle_subscribe_command,
+    handle_unsubscribe_command,
+    handle_list_subscriptions_command,
+)
 
 
 def _get_effective_config(ctx: Context, plugin_config: AstrBotConfig | None) -> AstrBotConfig | dict:
@@ -124,6 +130,8 @@ class AllCharPlugin(Star):
         logger.info("astrbot_all_char 插件初始化完成（命令 + LLM 工具模式）")
         # 初始化简易提醒的持久化调度中心，保证重启后可自动恢复未到期提醒
         init_simple_reminder_center(self.context, self.config)
+        # 初始化邮件订阅定时发送中心（持久化订阅 + 每日到点发送）
+        init_email_subscription_center(self.context, self.config)
 
         # 注册一批可供 Agent 自动调用的工具（类似 astrbot_plugin_payqr）
         try:
@@ -353,7 +361,7 @@ class AllCharPlugin(Star):
         async for result in handle_send_email_to_command(event, self.context, self.config):
             yield result
 
-    @filter.regex(r"(?:发邮件到|发到邮箱|发送到邮箱|发送邮件\s*到)\s+[^\s@]+@[^\s@]+\.[^\s@]+\s+.+", priority=9999)
+    @filter.regex(r"(?:发邮件到|发到邮箱|发送到邮箱|发送邮件\s*到)\s*[^\s@]+@[^\s@]+\.[^\s@]+\s+.+", priority=9999)
     async def cmd_send_email_to_in_message(self, event: AstrMessageEvent):
         """
         消息任意位置出现「发邮件到 邮箱 内容」或「发到邮箱 邮箱 内容」时解析并发信（如：xxx，发邮件到 xxx@qq.com 今天晚饭）。
@@ -367,6 +375,26 @@ class AllCharPlugin(Star):
         检测到消息含「邮件」且含邮箱地址时：用 LLM 生成主题与正文并发送。
         """
         async for result in handle_email_intent(event, self.context, self.config):
+            yield result
+
+    # ---------------- 邮件订阅（持久化 + 每日定时发送） ----------------
+
+    @filter.command("订阅邮件", alias={"邮件订阅"})
+    async def cmd_email_subscribe(self, event: AstrMessageEvent):
+        """订阅邮件 <订阅项> <收件邮箱>，每日到点发送。示例：订阅邮件 新闻 xxx@qq.com"""
+        async for result in handle_subscribe_command(event, self.context, self.config):
+            yield result
+
+    @filter.command("取消邮件订阅", alias={"邮件退订"})
+    async def cmd_email_unsubscribe(self, event: AstrMessageEvent):
+        """取消邮件订阅 <订阅项>。示例：取消邮件订阅 新闻"""
+        async for result in handle_unsubscribe_command(event, self.config):
+            yield result
+
+    @filter.command("我的邮件订阅", alias={"邮件订阅列表"})
+    async def cmd_email_subscription_list(self, event: AstrMessageEvent):
+        """查看当前用户的邮件订阅列表。"""
+        async for result in handle_list_subscriptions_command(event, self.config):
             yield result
 
     # ---------------- LLM Tools（供 AI 自动调用） ----------------

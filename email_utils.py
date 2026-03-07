@@ -135,14 +135,16 @@ async def handle_send_email_command(event: AstrMessageEvent, config: AstrBotConf
         )
         return
 
-    # 简单解析：按空格分三段，第一段收件人，第二段主题，剩余为正文
+    # 解析：收件人 + 主题 + 正文（三段）；若只给两段，则第二段同时作为主题和正文
     parts = re.split(r"\s+", raw, maxsplit=2)
-    if len(parts) < 3:
+    if len(parts) < 2:
         yield event.plain_result(
-            "请按格式输入：/发邮件 <收件人邮箱> <主题> <正文>，共三段。"
+            "请按格式输入：/发邮件 <收件人邮箱> <主题> <正文>，或 /发邮件 <收件人邮箱> <主题兼正文>。"
         )
         return
-    to_addr, subject, body = parts[0], parts[1], parts[2]
+    to_addr = parts[0]
+    subject = parts[1]
+    body = parts[2] if len(parts) > 2 else parts[1]
     if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", to_addr):
         yield event.plain_result("收件人邮箱格式不正确，请检查。")
         return
@@ -182,11 +184,15 @@ async def _generate_and_send_email(
         yield event.plain_result("当前无法使用 LLM 生成邮件内容，请用命令：/发邮件 收件人 主题 正文")
         return
     prompt = (
-        "用户希望发一封邮件到 "
+        "用户要发一封邮件到 "
         + to_addr
-        + "。用户对内容的描述："
+        + "。用户对邮件内容的描述："
         + user_prompt
-        + "\n\n请根据上述描述生成邮件的主题和正文。严格按以下格式回复，不要其他说明：\n"
+        + "\n\n请根据描述生成「主题」和「正文」。要求：\n"
+        "1. 正文就是用户要发出去的那份内容本身（例如用户要「新闻」就写近期新闻摘要，要「天气」就写天气情况），不要写成在跟收件人讨论这件事、或询问对方看法的信。\n"
+        "2. 不要使用占位符如 [您的姓名]、[日期] 等，直接写完整内容。\n"
+        "3. 语气自然、简洁，像发给熟人看的摘要或备忘。\n\n"
+        "严格按以下格式回复，不要其他说明：\n"
         "第一行：邮件主题（一句话，简短）\n"
         "从第二行起：邮件正文（可多行，纯文本）。"
     )
@@ -203,6 +209,17 @@ async def _generate_and_send_email(
     lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
     subject = (lines[0] or "（无主题）").strip()[:200]
     body = "\n".join(lines[1:]).strip() if len(lines) > 1 else (lines[0] or "")
+    # 去掉 LLM 误输出的格式说明前缀，避免主题变成「第一行：xxx」「邮件主题：xxx」
+    for prefix in ("第一行：", "邮件主题：", "主题："):
+        if subject.startswith(prefix):
+            subject = subject[len(prefix) :].strip()
+            break
+    if not subject:
+        subject = "（无主题）"
+    for prefix in ("从第二行起：", "正文："):
+        if body.startswith(prefix):
+            body = body[len(prefix) :].strip()
+            break
     ok, msg = send_email_sync(
         sender=sender,
         auth_code=auth_code,
@@ -218,9 +235,9 @@ async def _generate_and_send_email(
 # 句首「任意称呼 + 逗号/空格」可去掉，便于命中命令（不写死具体名字）
 STRIP_CALL_PREFIX = re.compile(r"^\s*[^\s，,]+[，,]\s*")
 
-# 匹配「发邮件到 / 发到邮箱 / 发送到邮箱 / 发送邮件到 / 发送邮件 到」+ 邮箱 + 内容（可从整条消息任意位置匹配）
+# 匹配「发邮件到/发到邮箱/…」+ 邮箱 + 内容；邮箱前允许无空格（如 发邮件到484238618@qq.com）
 SEND_TO_EMAIL_PATTERN = re.compile(
-    r"(发邮件到|发到邮箱|发送到邮箱|发送邮件\s*到)\s+([^\s@]+@[^\s@]+\.[^\s@]+)\s+(.+)",
+    r"(发邮件到|发到邮箱|发送到邮箱|发送邮件\s*到)\s*([^\s@]+@[^\s@]+\.[^\s@]+)\s+(.+)",
     re.DOTALL,
 )
 

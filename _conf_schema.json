@@ -544,6 +544,30 @@
         "type": "string",
         "hint": "QQ 邮箱 SSL 为 465，TLS 为 587。",
         "default": "465"
+      },
+      "email_subscription_time": {
+        "description": "邮件订阅每日发送时间",
+        "type": "string",
+        "hint": "格式 时:分，如 08:00 表示每天 8 点发送。",
+        "default": "08:00"
+      },
+      "email_subscription_timezone": {
+        "description": "邮件订阅时区",
+        "type": "string",
+        "hint": "如 Asia/Shanghai。",
+        "default": "Asia/Shanghai"
+      },
+      "email_subscription_topics": {
+        "description": "可订阅项（逗号分隔）",
+        "type": "string",
+        "hint": "用户可订阅的内容类型，如 新闻,天气,每日摘要。",
+        "default": "新闻,天气,每日摘要"
+      },
+      "email_subscription_default_umo": {
+        "description": "订阅定时发送用 LLM 的会话 ID（可选）",
+        "type": "string",
+        "hint": "留空则尝试默认会话；定时任务生成正文时用该会话的 LLM。",
+        "default": ""
       }
     }
   }
