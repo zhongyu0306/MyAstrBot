@@ -645,10 +645,15 @@ class AllCharPlugin(Star):
     ):
         """发送邮件到指定收件人（使用配置的 QQ 邮箱与授权码）。
 
+        使用建议（给 LLM 的决策规则）：
+        - 当用户要求「把某内容发到/发送到 xxx@qq.com 邮件」「发到我邮箱」等时，必须调用本工具真正发送邮件，不能只在回复中说「已发送」而不调用工具。
+        - 先整理好要发送的正文内容，再调用本工具传入 to_addr（收件人邮箱）、subject（主题）、body（正文）。
+        - 若用户先要求搜索或整理内容再发邮件，应先完成搜索/整理，再调用本工具将结果作为 body 发送。
+
         Args:
-            to_addr(string): 收件人邮箱地址。
+            to_addr(string): 收件人邮箱地址，例如 1102025067@qq.com。
             subject(string): 邮件主题。
-            body(string): 邮件正文。
+            body(string): 邮件正文内容。
         """
         ctx_wrapper = ContextWrapper[AstrAgentContext](self.context)  # type: ignore[type-arg]
         tool = SendEmailTool()
@@ -1373,7 +1378,9 @@ class SendEmailTool(FunctionTool[AstrAgentContext]):
     """
 
     name: str = "send_email"
-    description: str = "向指定收件人发送邮件，需要主题和正文。发件人使用插件配置的 QQ 邮箱与授权码。"
+    description: str = (
+        "向指定收件人发送邮件（QQ 邮箱）。当用户要求「把某内容发到/发送到 xxx@qq.com 邮件」或「发到我邮箱」时，必须调用本工具真正发送，不能只在文字中说已发送。参数：to_addr 收件人邮箱、subject 主题、body 正文。"
+    )
     parameters: dict = Field(
         default_factory=lambda: {
             "type": "object",
