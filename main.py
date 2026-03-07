@@ -65,6 +65,8 @@ from .music_utils import (
 )
 from .email_utils import (
     handle_send_email_command,
+    handle_send_email_to_command,
+    handle_send_email_to_in_message,
     handle_email_intent,
     send_email_sync,
     _get_email_config as get_email_config,
@@ -342,10 +344,27 @@ class AllCharPlugin(Star):
         async for result in handle_send_email_command(event, self.config):
             yield result
 
-    @filter.regex(r"邮件", priority=9999)
+    @filter.command("发邮件到", alias={"发到邮箱", "发送到邮箱"})
+    async def cmd_send_email_to(self, event: AstrMessageEvent):
+        """
+        发邮件到 <邮箱> <内容描述>：用 LLM 根据描述生成主题与正文并发送，走命令管道优先于主对话。
+        示例：发邮件到 1102025067@qq.com 今天晚饭
+        """
+        async for result in handle_send_email_to_command(event, self.context, self.config):
+            yield result
+
+    @filter.regex(r"(?:发邮件到|发到邮箱|发送到邮箱)\s+[^\s@]+@[^\s@]+\.[^\s@]+\s+.+", priority=9999)
+    async def cmd_send_email_to_in_message(self, event: AstrMessageEvent):
+        """
+        消息任意位置出现「发邮件到 邮箱 内容」或「发到邮箱 邮箱 内容」时解析并发信（如：xxx，发邮件到 xxx@qq.com 今天晚饭）。
+        """
+        async for result in handle_send_email_to_in_message(event, self.context, self.config):
+            yield result
+
+    @filter.regex(r"邮件", priority=9998)
     async def cmd_email_intent(self, event: AstrMessageEvent):
         """
-        检测到消息含「邮件」且含邮箱地址时优先处理：用 LLM 生成主题与正文并发送，避免被主对话抢先回复。
+        检测到消息含「邮件」且含邮箱地址时：用 LLM 生成主题与正文并发送。
         """
         async for result in handle_email_intent(event, self.context, self.config):
             yield result
