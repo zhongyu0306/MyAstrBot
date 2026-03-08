@@ -188,7 +188,7 @@ class AllCharPlugin(Star):
         async for result in handle_sy_rmd_group(event, self.context, self.config):
             yield result
 
-    @filter.command("提醒")
+    @filter.command("提醒", alias={"提醒事项"})
     async def cmd_simple_reminder(self, event: AstrMessageEvent):
         """
         简易提醒命令：/提醒 <时间> <内容>
@@ -199,6 +199,15 @@ class AllCharPlugin(Star):
         - /提醒 08:30 上班打卡
         """
         async for result in handle_simple_reminder(event, self.context, self.config):
+            yield result
+
+    @filter.command("提醒列表", alias={"我的提醒", "查看提醒"})
+    async def cmd_simple_reminder_list(self, event: AstrMessageEvent):
+        """
+        查看当前用户在当前会话中的待执行提醒列表。
+        """
+        wrapped = _CmdWrappedEvent(event, "/提醒 列表")
+        async for result in handle_simple_reminder(wrapped, self.context, self.config):
             yield result
 
     # ---------------- 股票 ----------------

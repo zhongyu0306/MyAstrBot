@@ -169,56 +169,6 @@
       }
     }
   },
-  "epic": {
-    "description": "Epic 免费游戏",
-    "hint": "Epic 免费游戏 API 与定时推送配置。",
-    "type": "object",
-    "items": {
-      "epic_api_url": {
-        "description": "Epic 免费游戏 API 地址",
-        "type": "string",
-        "hint": "默认 FAPI(lolimi)，可改为其他兼容接口",
-        "default": "https://api.lolimi.cn/API/EpicGames"
-      },
-      "epic_api_type": {
-        "description": "接口返回类型参数",
-        "type": "string",
-        "options": ["json", "img"],
-        "hint": "FAPI 必填 type：json=数据，img=图片",
-        "default": "json"
-      },
-      "epic_api_key": {
-        "description": "API 密钥（可选）",
-        "type": "string",
-        "hint": "若接口需要则填写，FAPI 部分接口无需密钥",
-        "default": ""
-      },
-      "epic_enable_timer": {
-        "description": "启用定时推送",
-        "type": "bool",
-        "hint": "到点向已订阅的群/用户推送 Epic 免费游戏列表。",
-        "default": false
-      },
-      "epic_timer_cron": {
-        "description": "定时 cron 表达式",
-        "type": "string",
-        "hint": "五段式：分 时 日 月 周，例如 0 12 * * * 表示每天 12:00",
-        "default": "0 12 * * *"
-      },
-      "epic_timer_timezone": {
-        "description": "定时任务时区",
-        "type": "string",
-        "hint": "例如 Asia/Shanghai",
-        "default": "Asia/Shanghai"
-      },
-      "epic_target_sessions": {
-        "description": "固定推送会话 ID 列表（可选）",
-        "type": "list",
-        "hint": "填写要接收定时推送的 unified_msg_origin，与「订阅」效果叠加。",
-        "default": []
-      }
-    }
-  },
   "jrys": {
     "description": "今日运势",
     "hint": "关键词触发、节假日爆率、固定当日运势与缓存。",
