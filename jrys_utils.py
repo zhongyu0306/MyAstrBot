@@ -650,6 +650,69 @@ WARNING_TEXT_Y_OFFSET = 10
 UNSIGN_TEXT_Y_OFFSET = 15
 TEXT_WRAP_WIDTH = 1000
 LEFT_PADDING = 20
+SECTION_GAP = 16
+INFO_LINE_GAP = 8
+TEXT_BOX_TOP_MARGIN = 28
+TEXT_BOX_BOTTOM_MARGIN = 28
+TEXT_TOP_LIMIT = 940
+IMAGE_BOTTOM_SAFE_MARGIN = 20
+DAILY_HIGHLIGHTS_FILE = "daily_highlights.json"
+LINUX_FALLBACK_FONT_CANDIDATES = [
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    "/usr/share/fonts/truetype/arphic/ukai.ttc",
+    "/usr/share/fonts/truetype/arphic/uming.ttc",
+]
+WINDOWS_FALLBACK_FONT_CANDIDATES = [
+    "C:/Windows/Fonts/msyh.ttc",
+    "C:/Windows/Fonts/simhei.ttf",
+    "C:/Windows/Fonts/simsun.ttc",
+]
+
+DEFAULT_LUCKY_COLORS = [
+    ("海盐蓝", "#9EC9E2"),
+    ("樱花粉", "#F7C8D7"),
+    ("薄荷绿", "#A8E6CF"),
+    ("奶油黄", "#F7E7A9"),
+    ("珊瑚橘", "#F6B26B"),
+    ("鸢尾紫", "#C8B6FF"),
+    ("青柠绿", "#CDE77F"),
+    ("云雾灰", "#D9D9D9"),
+]
+
+DEFAULT_LUCKY_FOODS = [
+    "红豆小圆子",
+    "番茄意面",
+    "奶油蘑菇汤",
+    "焦糖布丁",
+    "海盐可颂",
+    "抹茶蛋糕",
+    "烤鳗鱼饭",
+    "鲜虾云吞面",
+]
+
+DEFAULT_LUCKY_DIRECTIONS = [
+    "正东",
+    "东南",
+    "正南",
+    "西南",
+    "正西",
+    "西北",
+    "正北",
+    "东北",
+]
+
+DEFAULT_LUCKY_MOODS = [
+    "松弛一点更顺",
+    "主动一点会有回应",
+    "耐心一点会更稳",
+    "自信一点更容易发光",
+    "保持温柔会有好运",
+    "今天适合慢慢推进",
+]
 
 
 class FortunePainter:
@@ -687,11 +750,13 @@ class FortunePainter:
         )
 
         assets_root = Path(__file__).resolve().parent / "jrys_assets"
+        self.assets_root = assets_root
         self.data_dir = str(assets_root)
         self.avatar_dir = os.path.join(self.data_dir, "avatars")
         self.background_dir = os.path.join(self.data_dir, "backgroundFolder")
         self.font_dir = os.path.join(self.data_dir, "font")
         self.font_path = os.path.join(self.font_dir, self.font_name)
+        self.daily_highlights_path = assets_root / DAILY_HIGHLIGHTS_FILE
 
         os.makedirs(self.avatar_dir, exist_ok=True)
         os.makedirs(self.background_dir, exist_ok=True)
@@ -715,16 +780,179 @@ class FortunePainter:
             "holiday_rates", {"good": 85, "normal": 15, "bad": 0}
         )
 
-        self.fonts = {}
-        font_sizes = [50, 60, 36, 30]
+        font_sizes = [20, 22, 24, 30, 36, 44, 50, 54, 60]
+        self.fonts = self._load_font_map(self.font_path, font_sizes)
+        self.body_font_path = self._discover_body_font_path()
+        if self.body_font_path:
+            self.body_fonts = self._load_font_map(self.body_font_path, font_sizes)
+            logger.info("今日运势：正文回退字体已启用: %s", self.body_font_path)
+        else:
+            self.body_fonts = dict(self.fonts)
+            logger.warning("今日运势：未找到跨平台中文回退字体，将继续使用 jrys_font.ttf")
+
+        self.lucky_colors = list(DEFAULT_LUCKY_COLORS)
+        self.lucky_foods = list(DEFAULT_LUCKY_FOODS)
+        self.lucky_directions = list(DEFAULT_LUCKY_DIRECTIONS)
+        self.lucky_moods = list(DEFAULT_LUCKY_MOODS)
+        self._load_daily_highlights_assets()
+
+    def _load_font_map(self, font_path: str, font_sizes: list[int]) -> dict[int, ImageFont.ImageFont]:
+        fonts: dict[int, ImageFont.ImageFont] = {}
         try:
             for size in font_sizes:
-                self.fonts[size] = ImageFont.truetype(self.font_path, size)
+                fonts[size] = ImageFont.truetype(font_path, size)
+            return fonts
         except Exception:
-            logger.error(f"今日运势：无法加载字体文件 {self.font_path}, 使用默认字体回退")
+            logger.error("今日运势：无法加载字体文件 %s，使用默认字体回退", font_path)
             default_font = ImageFont.load_default()
-            for size in font_sizes:
-                self.fonts[size] = default_font
+            return {size: default_font for size in font_sizes}
+
+    def _discover_body_font_path(self) -> str | None:
+        local_candidates = []
+        try:
+            for entry in sorted(Path(self.font_dir).glob("*")):
+                if entry.name == self.font_name:
+                    continue
+                if entry.suffix.lower() in {".ttf", ".ttc", ".otf"}:
+                    local_candidates.append(str(entry))
+        except Exception:
+            pass
+
+        config_candidates = self.plugin_config.get("jrys_fallback_font_paths", [])
+        normalized_config_candidates = []
+        if isinstance(config_candidates, list):
+            normalized_config_candidates = [str(item).strip() for item in config_candidates if str(item).strip()]
+
+        candidates = (
+            local_candidates
+            + normalized_config_candidates
+            + LINUX_FALLBACK_FONT_CANDIDATES
+            + WINDOWS_FALLBACK_FONT_CANDIDATES
+        )
+        for candidate in candidates:
+            path = Path(candidate)
+            if path.exists():
+                return str(path)
+        return None
+
+    def _load_daily_highlights_assets(self) -> None:
+        try:
+            if not self.daily_highlights_path.exists():
+                logger.warning(
+                    "今日运势：未找到附加素材文件 %s，使用内置默认值",
+                    self.daily_highlights_path,
+                )
+                return
+
+            data = json.loads(self.daily_highlights_path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("daily_highlights.json 顶层必须为对象")
+
+            self.lucky_colors = self._parse_color_entries(data.get("lucky_colors"))
+            self.lucky_foods = self._parse_string_entries(
+                data.get("lucky_foods"), DEFAULT_LUCKY_FOODS
+            )
+            self.lucky_directions = self._parse_string_entries(
+                data.get("lucky_directions"), DEFAULT_LUCKY_DIRECTIONS
+            )
+            self.lucky_moods = self._parse_string_entries(
+                data.get("lucky_moods"), DEFAULT_LUCKY_MOODS
+            )
+        except Exception as e:
+            logger.warning("今日运势：读取附加素材文件失败，使用默认值: %s", e)
+            self.lucky_colors = list(DEFAULT_LUCKY_COLORS)
+            self.lucky_foods = list(DEFAULT_LUCKY_FOODS)
+            self.lucky_directions = list(DEFAULT_LUCKY_DIRECTIONS)
+            self.lucky_moods = list(DEFAULT_LUCKY_MOODS)
+
+    def _parse_color_entries(self, entries) -> list[tuple[str, str]]:
+        parsed: list[tuple[str, str]] = []
+        if isinstance(entries, list):
+            for item in entries:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "").strip()
+                hex_value = str(item.get("hex") or "").strip()
+                if name and hex_value:
+                    parsed.append((name, hex_value))
+        return parsed or list(DEFAULT_LUCKY_COLORS)
+
+    def _parse_string_entries(self, entries, fallback: list[str]) -> list[str]:
+        parsed: list[str] = []
+        if isinstance(entries, list):
+            for item in entries:
+                text = str(item or "").strip()
+                if text:
+                    parsed.append(text)
+        return parsed or list(fallback)
+
+    def _shorten_text(self, text: str, max_chars: int = 38) -> str:
+        cleaned = " ".join(str(text or "").replace("\n", " ").split()).strip()
+        if not cleaned:
+            return ""
+
+        if len(cleaned) <= max_chars:
+            return cleaned
+
+        for sep in ("。", "；", "！", "？", "，", ",", " "):
+            idx = cleaned.find(sep)
+            if 0 < idx <= max_chars:
+                return cleaned[: idx + 1].strip()
+
+        return cleaned[: max_chars - 1].rstrip("，,；; ") + "…"
+
+    def _build_daily_highlights(
+        self, rng: random.Random, sign_text: str, unsign_text: str
+    ) -> dict[str, str]:
+        lucky_color_name, lucky_color_hex = rng.choice(self.lucky_colors)
+        suitable_text = " ".join(str(sign_text or "").replace("\n", " ").split()).strip()
+        if not suitable_text:
+            suitable_text = "适合慢慢推进手头计划"
+        reminder_text = self._shorten_text(unsign_text, max_chars=40) or rng.choice(
+            self.lucky_moods
+        )
+        return {
+            "lucky_color": f"{lucky_color_name} {lucky_color_hex}",
+            "lucky_food": rng.choice(self.lucky_foods),
+            "lucky_number": str(rng.randint(1, 9)),
+            "lucky_direction": rng.choice(self.lucky_directions),
+            "suitable": suitable_text,
+            "reminder": reminder_text,
+            "lucky_mood": rng.choice(self.lucky_moods),
+        }
+
+    def _get_line_spacing(self, font: ImageFont.ImageFont) -> int:
+        return max(int(font.size * 1.25), font.size + 6)
+
+    def _get_wrapped_lines(
+        self,
+        text: str,
+        font: ImageFont.ImageFont,
+        draw: Optional[ImageDraw.ImageDraw] = None,
+        max_width: int = TEXT_WRAP_WIDTH,
+    ) -> List[str]:
+        lines: List[str] = []
+        raw_lines = str(text or "").splitlines() or [""]
+        for raw_line in raw_lines:
+            wrapped = self.wrap_text(
+                text=raw_line,
+                font=font,
+                draw=draw,
+                max_width=max_width,
+            )
+            lines.extend(wrapped if wrapped else [""])
+        return lines
+
+    def _measure_text_block_height(
+        self,
+        text: str,
+        font: ImageFont.ImageFont,
+        max_width: int = TEXT_WRAP_WIDTH,
+    ) -> int:
+        img = Image.new("RGB", (self.image_width, self.image_height))
+        draw = ImageDraw.Draw(img)
+        lines = self._get_wrapped_lines(text, font, draw=draw, max_width=max_width)
+        return max(len(lines), 1) * self._get_line_spacing(font)
 
     def generate_image_sync(
         self, user_id: str, avatar_path: str, background_path: str, jrys_data: dict
@@ -732,13 +960,6 @@ class FortunePainter:
         if not jrys_data:
             logger.error("今日运势：运势数据为空")
             return None
-
-        date_y = self.date_y
-        summary_y = self.summary_y
-        lucky_star_y = self.lucky_star_y
-        sign_text_y = self.sign_text_y
-        unsign_text_y = self.unsign_text_y
-        warning_text_y = self.warning_text_y
 
         try:
             rng = random.Random()
@@ -796,75 +1017,172 @@ class FortunePainter:
             lucky_star = fortune_data.get("luckyStar", "幸运星未知")
             sign_text = fortune_data.get("signText", "星座运势未知")
             unsign_text = fortune_data.get("unsignText", "非星座运势未知")
+            daily_highlights = self._build_daily_highlights(rng, sign_text, unsign_text)
             warning_text = "仅供娱乐 | 相信科学 | 请勿迷信"
 
-            unsign_lines = self.wrap_text(
-                unsign_text, font=self.fonts[36], max_width=TEXT_WRAP_WIDTH
+            info_lines = [
+                f"今日幸运色：{daily_highlights['lucky_color']}",
+                f"今日幸运食物：{daily_highlights['lucky_food']}",
+                f"今日幸运数字：{daily_highlights['lucky_number']}",
+                f"今日幸运方位：{daily_highlights['lucky_direction']}",
+                f"适合做什么：{daily_highlights['suitable']}",
+                f"今日提醒：{daily_highlights['reminder']}",
+                f"今日状态：{daily_highlights['lucky_mood']}",
+                f"运势解读：{unsign_text}",
+            ]
+
+            def _build_layout_metrics(
+                date_font: ImageFont.ImageFont,
+                summary_font: ImageFont.ImageFont,
+                star_font: ImageFont.ImageFont,
+                current_detail_font: ImageFont.ImageFont,
+                current_explain_font: ImageFont.ImageFont,
+                current_warning_font: ImageFont.ImageFont,
+                current_section_gap: int,
+                current_info_gap: int,
+                text_max_width: int,
+            ) -> tuple[list[tuple[str, ImageFont.ImageFont, str, bool]], int]:
+                blocks: list[tuple[str, ImageFont.ImageFont, str, bool]] = [
+                    (date, date_font, "center", True),
+                    (fortune_summary, summary_font, "center", False),
+                    (lucky_star, star_font, "center", True),
+                ]
+                for idx, line in enumerate(info_lines):
+                    blocks.append(
+                        (
+                            line,
+                            current_explain_font if idx == len(info_lines) - 1 else current_detail_font,
+                            "left",
+                            False,
+                        )
+                    )
+                blocks.append((warning_text, current_warning_font, "center", False))
+
+                total_height = 0
+                for idx, (text, font, _, _) in enumerate(blocks):
+                    total_height += self._measure_text_block_height(
+                        text=text,
+                        font=font,
+                        max_width=text_max_width,
+                    )
+                    if idx == 2:
+                        total_height += current_section_gap
+                    elif 0 <= idx < 2:
+                        total_height += current_section_gap
+                    elif 3 <= idx < len(blocks) - 1:
+                        total_height += current_info_gap
+                return blocks, total_height
+
+            available_bottom = self.image_height - TEXT_BOX_BOTTOM_MARGIN
+            layout_presets = [
+                {
+                    "date_font": self.body_fonts[50],
+                    "summary_font": self.body_fonts[60],
+                    "star_font": self.body_fonts[60],
+                    "detail_font": self.body_fonts[30],
+                    "explain_font": self.body_fonts[24],
+                    "warning_font": self.body_fonts[24],
+                    "section_gap": SECTION_GAP,
+                    "info_gap": INFO_LINE_GAP,
+                    "text_max_width": TEXT_WRAP_WIDTH,
+                },
+                {
+                    "date_font": self.body_fonts[44],
+                    "summary_font": self.body_fonts[54],
+                    "star_font": self.body_fonts[54],
+                    "detail_font": self.body_fonts[24],
+                    "explain_font": self.body_fonts[22],
+                    "warning_font": self.body_fonts[22],
+                    "section_gap": 10,
+                    "info_gap": 4,
+                    "text_max_width": 1020,
+                },
+                {
+                    "date_font": self.body_fonts[44],
+                    "summary_font": self.body_fonts[50],
+                    "star_font": self.body_fonts[50],
+                    "detail_font": self.body_fonts[22],
+                    "explain_font": self.body_fonts[20],
+                    "warning_font": self.body_fonts[20],
+                    "section_gap": 6,
+                    "info_gap": 2,
+                    "text_max_width": 1040,
+                },
+            ]
+
+            selected = None
+            blocks: list[tuple[str, ImageFont.ImageFont, str, bool]] = []
+            total_height = 0
+            start_y = self.date_y
+            for preset in layout_presets:
+                blocks, total_height = _build_layout_metrics(
+                    preset["date_font"],
+                    preset["summary_font"],
+                    preset["star_font"],
+                    preset["detail_font"],
+                    preset["explain_font"],
+                    preset["warning_font"],
+                    preset["section_gap"],
+                    preset["info_gap"],
+                    preset["text_max_width"],
+                )
+                candidate_start_y = min(self.date_y, available_bottom - total_height)
+                selected = preset
+                start_y = max(TEXT_TOP_LIMIT, candidate_start_y)
+                if candidate_start_y >= TEXT_TOP_LIMIT:
+                    break
+
+            if selected is None:
+                logger.error("今日运势：布局预设为空")
+                return None
+
+            text_max_width = int(selected["text_max_width"])
+            section_gap = int(selected["section_gap"])
+            info_gap = int(selected["info_gap"])
+            content_bottom = start_y + total_height + TEXT_BOX_BOTTOM_MARGIN
+            target_image_height = max(
+                self.image_height,
+                content_bottom + IMAGE_BOTTOM_SAFE_MARGIN,
+            )
+            overlay_top = max(900, start_y - TEXT_BOX_TOP_MARGIN)
+            overlay_height = min(
+                target_image_height - overlay_top - IMAGE_BOTTOM_SAFE_MARGIN,
+                max(TEXT_BOX_HEIGHT, total_height + TEXT_BOX_TOP_MARGIN + TEXT_BOX_BOTTOM_MARGIN),
             )
 
-            if len(unsign_lines) > 3:
-                warning_text_y += (len(unsign_lines) - 3) * WARNING_TEXT_Y_OFFSET
-                unsign_text_y -= (len(unsign_lines) - 3) * UNSIGN_TEXT_Y_OFFSET
-
-            image = self.crop_center(background_path)
+            image = self.crop_center(
+                background_path,
+                height=target_image_height,
+            )
             if image is None:
                 logger.error("今日运势：裁剪背景图片失败")
                 return None
 
             image = self.add_transparent_layer(
-                image, position=(0, TEXT_BOX_Y), box_width=IMAGE_WIDTH, box_height=TEXT_BOX_HEIGHT
+                image,
+                position=(0, overlay_top),
+                box_width=IMAGE_WIDTH,
+                box_height=overlay_height,
             )
 
-            image = self.draw_text(
-                image,
-                text=date,
-                position="center",
-                y=date_y,
-                color=(255, 255, 255),
-                font=self.fonts[50],
-                gradients=True,
-            )
-            image = self.draw_text(
-                image,
-                text=fortune_summary,
-                position="center",
-                y=summary_y,
-                color=(255, 255, 255),
-                font=self.fonts[60],
-            )
-            image = self.draw_text(
-                image,
-                text=lucky_star,
-                position="center",
-                y=lucky_star_y,
-                color=(255, 255, 255),
-                font=self.fonts[60],
-                gradients=True,
-            )
-            image = self.draw_text(
-                image,
-                text=sign_text,
-                position="left",
-                y=sign_text_y,
-                color=(255, 255, 255),
-                font=self.fonts[30],
-            )
-            image = self.draw_text(
-                image,
-                text=unsign_text,
-                position="left",
-                y=unsign_text_y,
-                color=(255, 255, 255),
-                font=self.fonts[30],
-            )
-            image = self.draw_text(
-                image,
-                text=warning_text,
-                position="center",
-                y=warning_text_y,
-                color=(255, 255, 255),
-                font=self.fonts[30],
-            )
+            current_y = start_y
+            for idx, (text, font, position, gradients) in enumerate(blocks):
+                image, current_y = self.draw_text_block(
+                    image,
+                    text=text,
+                    position=position,
+                    y=current_y,
+                    color=(255, 255, 255),
+                    font=font,
+                    max_width=text_max_width,
+                    gradients=gradients,
+                )
+                if idx < 2:
+                    current_y += section_gap
+                elif idx == 2:
+                    current_y += section_gap
+                elif idx < len(blocks) - 2:
+                    current_y += info_gap
 
             image = self.draw_avatar_img(avatar_path, image)
 
@@ -890,15 +1208,32 @@ class FortunePainter:
         max_width: int = 800,
         gradients: bool = False,
     ) -> Image.Image:
+        img, _ = self.draw_text_block(
+            img=img,
+            text=text,
+            position=position,
+            font=font,
+            y=y,
+            color=color,
+            max_width=max_width,
+            gradients=gradients,
+        )
+        return img
+
+    def draw_text_block(
+        self,
+        img: Image.Image,
+        text: str,
+        position: str | tuple[int, int],
+        font: ImageFont.ImageFont,
+        y: Optional[int] = None,
+        color: Tuple[int, int, int] = (255, 255, 255),
+        max_width: int = 800,
+        gradients: bool = False,
+    ) -> Tuple[Image.Image, int]:
         try:
             draw = ImageDraw.Draw(img)
-
-            lines = self.wrap_text(
-                text=text,
-                font=font,
-                draw=draw,
-                max_width=TEXT_WRAP_WIDTH,
-            )
+            lines = self._get_wrapped_lines(text, font, draw=draw, max_width=max_width)
 
             img_width, img_height = img.size
 
@@ -935,8 +1270,11 @@ class FortunePainter:
                 def offset_x_func(line: str) -> int:
                     return 0
 
-            line_spacing = int(font.size * 1.5)
+            line_spacing = self._get_line_spacing(font)
             for line in lines:
+                if not line:
+                    text_y += line_spacing
+                    continue
                 if gradients:
                     base_x = x_func(line)
                     offset_x = offset_x_func(line)
@@ -959,10 +1297,10 @@ class FortunePainter:
 
                 text_y += line_spacing
 
-            return img
+            return img, text_y
         except Exception as e:
             logger.error(f"今日运势：绘制文字时出错: {e}")
-            return img
+            return img, y if y is not None else 0
 
     def crop_center(
         self, image_path: str, width: Optional[int] = None, height: Optional[int] = None
@@ -1043,18 +1381,24 @@ class FortunePainter:
                 draw = ImageDraw.Draw(img)
 
             lines: List[str] = []
-            current_line = ""
-            for char in text:
-                test_line = current_line + char
-                bbox = draw.textbbox((0, 0), test_line, font=font)
-                width = bbox[2] - bbox[0]
-                if width <= max_width:
-                    current_line = test_line
-                else:
+            for raw_line in str(text or "").splitlines() or [""]:
+                if not raw_line:
+                    lines.append("")
+                    continue
+
+                current_line = ""
+                for char in raw_line:
+                    test_line = current_line + char
+                    bbox = draw.textbbox((0, 0), test_line, font=font)
+                    width = bbox[2] - bbox[0]
+                    if width <= max_width:
+                        current_line = test_line
+                    else:
+                        if current_line:
+                            lines.append(current_line)
+                        current_line = char
+                if current_line:
                     lines.append(current_line)
-                    current_line = char
-            if current_line:
-                lines.append(current_line)
             return lines
         except Exception as e:
             logger.error(f"今日运势：文本换行时出错: {e}")
@@ -1370,4 +1714,3 @@ async def handle_jrys_last_command(event: AstrMessageEvent, context: Context, co
 
     async for r in plugin.jrys_last_command_handler(event):
         yield r
-
