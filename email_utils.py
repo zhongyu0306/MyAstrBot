@@ -415,22 +415,21 @@ def send_email_sync(
         return False, f"发送失败：{e}"
 
 
-async def handle_send_email_command(event: AstrMessageEvent, config: AstrBotConfig):
-    """
-    处理 /发邮件 命令：/发邮件 <收件人> <主题> <正文>
-    收件人、主题、正文之间用空格分隔；若正文含空格，可用引号包裹或放在最后整体作为正文。
-    简化解析：第一段为收件人，第二段为主题，剩余为正文。
-    """
+async def handle_send_email_command(
+    event: AstrMessageEvent,
+    context: Context,
+    config: AstrBotConfig,
+):
+    """处理 /发邮件 命令：/发邮件 <收件人邮箱> <内容描述>，交给 LLM 生成正式邮件。"""
     raw = (event.get_message_str() or "").strip()
-    # 去掉命令头
     for prefix in ("/发邮件", "发邮件", "/发送邮件", "发送邮件"):
         if raw.startswith(prefix):
             raw = raw[len(prefix) :].strip()
             break
     if not raw:
         yield event.plain_result(
-            "用法：/发邮件 <收件人邮箱> <主题> <正文>\n"
-            "示例：/发邮件 someone@qq.com 测试 这是一封测试邮件\n"
+            "用法：/发邮件 <收件人邮箱> <内容描述>\n"
+            "示例：/发邮件 someone@qq.com 告诉他今晚来吃饭\n"
             "请先在插件配置中填写 QQ 邮箱地址和授权码（QQ 邮箱设置 -> 账户 -> POP3/IMAP 服务 -> 授权码）。"
         )
         return
@@ -443,30 +442,24 @@ async def handle_send_email_command(event: AstrMessageEvent, config: AstrBotConf
         )
         return
 
-    # 解析：收件人 + 主题 + 正文（三段）；若只给两段，则第二段同时作为主题和正文
-    parts = re.split(r"\s+", raw, maxsplit=2)
+    parts = re.split(r"\s+", raw, maxsplit=1)
     if len(parts) < 2:
         yield event.plain_result(
-            "请按格式输入：/发邮件 <收件人邮箱> <主题> <正文>，或 /发邮件 <收件人邮箱> <主题兼正文>。"
+            "请按格式输入：/发邮件 <收件人邮箱> <内容描述>。"
         )
         return
     to_addr = parts[0]
-    subject = parts[1]
-    body = parts[2] if len(parts) > 2 else parts[1]
+    user_prompt = parts[1].strip()
     if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", to_addr):
         yield event.plain_result("收件人邮箱格式不正确，请检查。")
         return
+    if not user_prompt:
+        yield event.plain_result("请补充要发送的内容描述，例如：/发邮件 xxx@qq.com 告诉他今晚来吃饭")
+        return
 
-    ok, msg = send_email_sync(
-        sender=sender,
-        auth_code=auth_code,
-        to_addrs=[to_addr],
-        subject=subject,
-        body=body,
-        smtp_host=_get_email_config(config, "email_smtp_host", "smtp.qq.com"),
-        smtp_port=int(_get_email_config(config, "email_smtp_port", "465") or "465"),
-    )
-    yield event.plain_result(msg)
+    event.stop_event()
+    async for result in _generate_and_send_email(event, context, config, to_addr, user_prompt):
+        yield result
 
 
 async def _generate_and_send_email(

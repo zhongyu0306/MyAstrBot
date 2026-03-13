@@ -355,10 +355,10 @@ class AllCharPlugin(Star):
     @filter.command("发邮件", alias={"发送邮件"})
     async def cmd_send_email(self, event: AstrMessageEvent):
         """
-        /发邮件 <收件人邮箱> <主题> <正文>
-        使用 QQ 邮箱发送邮件，需在插件配置中填写发件人邮箱与授权码。
+        /发邮件 <收件人邮箱> <内容描述>
+        使用 QQ 邮箱发送邮件，邮件主题与正文会由 LLM 基于描述生成。
         """
-        async for result in handle_send_email_command(event, self.config):
+        async for result in handle_send_email_command(event, self.context, self.config):
             yield result
 
     @filter.command("发邮件到", alias={"发到邮箱", "发送到邮箱"})

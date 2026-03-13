@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncIterator, Optional
 
@@ -15,10 +16,27 @@ from .email_utils import (
     send_email_sync,
     EMAIL_PATTERN,
 )
+from .qianfan_search_utils import (
+    DAILY_LIMIT_SMART,
+    _call_smart_search,
+    _get_daily_counts,
+    _get_qianfan_api_key,
+    _increment_daily_count,
+)
 
 
 _SUBSCRIPTION_FILE_NAME = "email_subscriptions.json"
 _LOCK = asyncio.Lock()
+_NEWS_SUBSCRIPTION_SMART_QUERY_TEMPLATE = (
+    "今天是 {today}。\n"
+    "请你作为“每日新闻邮件订阅助手”，使用智能搜索能力自动选择并整理今天最值得关注的新闻，输出给邮件正文直接使用。\n"
+    "要求：\n"
+    "1. 以中文输出，纯文本，不要 Markdown。\n"
+    "2. 优先给出 5 到 8 条今天的重要新闻，覆盖国内、国际、科技/商业等高关注话题。\n"
+    "3. 每条新闻写成“标题 + 一两句摘要”的形式。\n"
+    "4. 不要寒暄、不要落款、不要说“以下是为你整理”。\n"
+    "5. 如有明显时效性，尽量写清楚是今天的动态。\n"
+)
 
 
 def _get_subscription_file_path() -> Path:
@@ -140,6 +158,53 @@ class _EmailSubscriptionCenter:
         except Exception as e:
             logger.error("邮件订阅调度启动失败: %s", e)
 
+    async def _build_subscription_body(
+        self,
+        topic: str,
+        provider_id: str | None,
+    ) -> str:
+        topic = (topic or "").strip()
+        if topic == "新闻":
+            api_key = _get_qianfan_api_key(self.config)
+            if not api_key:
+                logger.warning("邮件订阅：新闻订阅未配置千帆 API Key，将回退到普通 LLM 生成。")
+            else:
+                try:
+                    smart_count, _ = await _get_daily_counts()
+                    if smart_count >= DAILY_LIMIT_SMART:
+                        logger.warning("邮件订阅：今日千帆智能搜索次数已达上限，新闻订阅回退到普通 LLM。")
+                    else:
+                        query = _NEWS_SUBSCRIPTION_SMART_QUERY_TEMPLATE.format(
+                            today=datetime.now().strftime("%Y-%m-%d")
+                        )
+                        out = await _call_smart_search(api_key, query)
+                        if out:
+                            await _increment_daily_count("smart_search")
+                            return out.strip()
+                except Exception as e:
+                    logger.warning("邮件订阅：千帆智能搜索生成新闻订阅失败: %s", e)
+
+        body = f"今日【{topic}】订阅，请查收。"
+        if not provider_id:
+            return body
+
+        try:
+            prompt = (
+                f"请生成今日「{topic}」的邮件正文内容，用于每日订阅推送。"
+                "要求：简洁摘要、纯文本、多行可。不要称呼、落款、占位符。直接输出正文。"
+            )
+            llm_resp = await self.context.llm_generate(
+                chat_provider_id=provider_id,
+                prompt=prompt,
+            )
+            out = (getattr(llm_resp, "completion_text", None) or "").strip()
+            if out:
+                return out
+        except Exception as e:
+            logger.warning("邮件订阅生成内容失败 topic=%s: %s", topic, e)
+
+        return body
+
     async def _run_daily(self) -> None:
         """每日到点：为每条订阅生成内容并发邮件。"""
         sender = _get_email_config(self.config, "email_sender", "")
@@ -164,22 +229,7 @@ class _EmailSubscriptionCenter:
             if allowed and topic not in allowed:
                 continue
             subject = f"每日订阅 - {topic}"
-            body = f"今日【{topic}】订阅，请查收。"
-            if provider_id:
-                try:
-                    prompt = (
-                        f"请生成今日「{topic}」的邮件正文内容，用于每日订阅推送。"
-                        "要求：简洁摘要、纯文本、多行可。不要称呼、落款、占位符。直接输出正文。"
-                    )
-                    llm_resp = await self.context.llm_generate(
-                        chat_provider_id=provider_id,
-                        prompt=prompt,
-                    )
-                    out = (getattr(llm_resp, "completion_text", None) or "").strip()
-                    if out:
-                        body = out
-                except Exception as e:
-                    logger.warning("邮件订阅生成内容失败 topic=%s: %s", topic, e)
+            body = await self._build_subscription_body(topic, provider_id)
             ok, msg = send_email_sync(
                 sender=sender,
                 auth_code=auth_code,
