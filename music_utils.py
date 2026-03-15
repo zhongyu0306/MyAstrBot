@@ -1,7 +1,7 @@
 import asyncio
 import time
 from typing import Any, Dict, List, Tuple
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlparse
 
 import aiohttp
 
@@ -77,13 +77,30 @@ async def _http_get_json(url: str) -> Dict[str, Any] | None:
     """
     简单的 GET+JSON 封装，供网易云 NodeJS API 使用。
     """
+    return await _http_request_json(url)
+
+
+async def _http_request_json(
+    url: str,
+    *,
+    method: str = "GET",
+    data: Dict[str, Any] | None = None,
+    proxy: str | None = None,
+    headers: Dict[str, str] | None = None,
+    cookies: Dict[str, str] | None = None,
+) -> Dict[str, Any] | List[Any] | None:
+    """
+    通用 HTTP + JSON 封装，兼容 GET / POST，请求失败时返回 None。
+    """
     logger.info("[music] 请求 URL: %s", url)
     try:
         timeout = aiohttp.ClientTimeout(total=10)
         async with aiohttp.ClientSession(
-            timeout=timeout
+            timeout=timeout,
+            headers=headers,
         ) as session:
-            async with session.get(url) as resp:
+            request = session.post if str(method).upper() == "POST" else session.get
+            async with request(url, data=data, proxy=proxy or None, cookies=cookies) as resp:
                 text = await resp.text()
                 if resp.status != 200:
                     logger.warning(
@@ -121,11 +138,114 @@ async def _search_songs(cfg: Dict[str, Any], keyword: str) -> List[Dict[str, Any
     kw = (keyword or "").strip()
     if not kw:
         return []
+    proxy = str(cfg.get("proxy") or "").strip() or None
+    songs = await _search_songs_via_nodejs(cfg, kw, proxy=proxy)
+    if songs:
+        return songs
+    songs = await _search_songs_via_meting(cfg, kw, proxy=proxy)
+    if songs:
+        logger.info("[music] NodeJS 搜索失败，已回退到 Meting 搜索")
+        return songs
+    songs = await _search_songs_via_official(kw, limit=int(cfg.get("limit") or 3), proxy=proxy)
+    if songs:
+        logger.info("[music] 已回退到网易官方 cloudsearch 搜索")
+        return songs
+    return []
+
+
+async def _search_songs_via_nodejs(
+    cfg: Dict[str, Any],
+    keyword: str,
+    *,
+    proxy: str | None = None,
+) -> List[Dict[str, Any]]:
+    """
+    优先走兼容 NeteaseCloudMusicApi 的 NodeJS 服务。
+    这里使用 POST 与原 astrbot_plugin_music 保持一致。
+    """
     base = str(cfg.get("base_url") or DEFAULT_MUSIC_API_BASE).rstrip("/") + "/"
     limit = int(cfg.get("limit") or 3)
-    url = f"{base}search?keywords={quote(kw)}&limit={limit}"
-    data = await _http_get_json(url)
+    url = f"{base}search"
+    data = await _http_request_json(
+        url,
+        method="POST",
+        data={"keywords": keyword, "limit": limit, "type": 1, "offset": 0},
+        proxy=proxy,
+    )
     if not data:
+        return []
+    return _parse_nodejs_search_result(data)
+
+
+async def _search_songs_via_meting(
+    cfg: Dict[str, Any],
+    keyword: str,
+    *,
+    proxy: str | None = None,
+) -> List[Dict[str, Any]]:
+    """
+    NodeJS API 不可用时，回退到 qijieya 的 Meting 搜索接口。
+    该接口当前可稳定返回中文搜索结果和播放链接。
+    """
+    limit = int(cfg.get("limit") or 3)
+    url = f"https://api.qijieya.cn/meting/?server=netease&type=search&id={quote(keyword)}&limit={limit}"
+    data = await _http_request_json(url, proxy=proxy)
+    if not isinstance(data, list):
+        return []
+    parsed: List[Dict[str, Any]] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        song_id = _extract_song_id_from_url(item.get("url")) or _extract_song_id_from_url(item.get("lrc"))
+        parsed.append(
+            {
+                "id": song_id,
+                "name": str(item.get("name") or ""),
+                "artists": str(item.get("artist") or "未知歌手"),
+                "album": "",
+                "pic_url": str(item.get("pic") or ""),
+                "play_url": str(item.get("url") or ""),
+            }
+        )
+    return [song for song in parsed if song.get("name")]
+
+
+async def _search_songs_via_official(
+    keyword: str,
+    *,
+    limit: int = 3,
+    proxy: str | None = None,
+) -> List[Dict[str, Any]]:
+    """
+    最后回退到网易官方 cloudsearch 接口。
+    该接口对中文搜索不算稳定，但至少能在部分环境下作为兜底。
+    """
+    data = await _http_request_json(
+        "https://music.163.com/api/cloudsearch/pc",
+        method="POST",
+        data={"s": keyword, "limit": limit, "type": 1, "offset": 0},
+        proxy=proxy,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/132.0.0.0 Safari/537.36"
+            ),
+            "Referer": "https://music.163.com/",
+            "Origin": "https://music.163.com",
+        },
+        cookies={"appver": "2.0.2"},
+    )
+    if not data:
+        return []
+    return _parse_nodejs_search_result(data)
+
+
+def _parse_nodejs_search_result(data: Dict[str, Any] | List[Any]) -> List[Dict[str, Any]]:
+    """
+    兼容 NodeJS API / 官方 cloudsearch 的搜索结构。
+    """
+    if not isinstance(data, dict):
         return []
     result = data.get("result") or {}
     songs = result.get("songs") or []
@@ -156,6 +276,24 @@ async def _search_songs(cfg: Dict[str, Any], keyword: str) -> List[Dict[str, Any
     return parsed
 
 
+def _extract_song_id_from_url(url: Any) -> int | None:
+    """
+    从 Meting 返回的 URL 中提取 song id，例如：
+    https://api.qijieya.cn/meting/?server=netease&type=url&id=2104034295
+    """
+    raw = str(url or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = urlparse(raw)
+        song_id = parse_qs(parsed.query).get("id", [None])[0]
+        if song_id is None:
+            return None
+        return int(song_id)
+    except Exception:
+        return None
+
+
 async def _get_song_url(cfg: Dict[str, Any], song_id: Any) -> str | None:
     """
     使用 NeteaseCloudMusicApi 的 /song/url/v1 获取歌曲播放链接。
@@ -167,8 +305,14 @@ async def _get_song_url(cfg: Dict[str, Any], song_id: Any) -> str | None:
     # 1) 优先尝试 NodeJS NeteaseCloudMusicApi 的 /song/url/v1
     base = str(cfg.get("base_url") or DEFAULT_MUSIC_API_BASE).rstrip("/") + "/"
     level = str(cfg.get("quality") or "exhigh")
+    proxy = str(cfg.get("proxy") or "").strip() or None
     url = f"{base}song/url/v1?id={song_id}&level={quote(level)}"
-    data = await _http_get_json(url)
+    data = await _http_request_json(url, proxy=proxy)
+
+    if not data:
+        # 兼容部分旧版 NodeJS API，仅支持 /song/url
+        fallback_url = f"{base}song/url?id={song_id}"
+        data = await _http_request_json(fallback_url, proxy=proxy)
 
     play_url: str | None = None
     if data:
@@ -216,7 +360,7 @@ async def _build_play_text(cfg: Dict[str, Any], song: Dict[str, Any]) -> str:
     artists = song.get("artists") or ""
     album = song.get("album") or ""
     song_id = song.get("id")
-    play_url = await _get_song_url(cfg, song_id)
+    play_url = song.get("play_url") or await _get_song_url(cfg, song_id)
 
     header = "🎶 正在为你播放："
     title = name
@@ -250,7 +394,7 @@ async def _send_song_with_modes(
     name = song.get("name") or ""
     artists = song.get("artists") or ""
     song_id = song.get("id")
-    play_url = await _get_song_url(cfg, song_id)
+    play_url = song.get("play_url") or await _get_song_url(cfg, song_id)
 
     # 预构造文本消息（兜底）
     header = "🎶 正在为你播放："
@@ -500,4 +644,3 @@ async def llm_play_music_by_keyword(
     # 无事件时，仅返回文本 + 链接
     text = await _build_play_text(cfg, song)
     return text
-
