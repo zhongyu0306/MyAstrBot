@@ -3,8 +3,14 @@ AI 基金分析器核心模块
 提供基于大模型的智能分析功能，整合量化分析数据
 """
 
+import asyncio
 from datetime import datetime
+from time import perf_counter
 from typing import TYPE_CHECKING, Any
+import re
+from urllib.parse import urlsplit
+
+import aiohttp
 
 from astrbot.api import logger
 
@@ -36,10 +42,304 @@ class AIFundAnalyzer:
         """获取 LLM 提供商"""
         return self.context.get_using_provider()
 
+    @staticmethod
+    def _normalize_base_url(url: str) -> str:
+        url = (url or "").strip().rstrip("/")
+        if not url:
+            return ""
+        if not url.endswith("/v1"):
+            url = url + "/v1" if not re.search(r"/v\d+$", url) else url
+        return url
+
+    @staticmethod
+    def _normalize_api_keys(api_keys: Any) -> list[str]:
+        if api_keys is None:
+            return []
+        if isinstance(api_keys, list):
+            return [str(item).strip() for item in api_keys if str(item).strip()]
+        if isinstance(api_keys, tuple | set):
+            return [str(item).strip() for item in api_keys if str(item).strip()]
+        if isinstance(api_keys, str) and api_keys.strip():
+            return [api_keys.strip()]
+        if isinstance(api_keys, dict):
+            return [str(item).strip() for item in api_keys.values() if str(item).strip()]
+        return []
+
+    @classmethod
+    def _unwrap_config_value(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            for key in ("value", "default"):
+                if key in value:
+                    return value[key]
+        return value
+
+    @classmethod
+    def _coerce_mapping(cls, item: Any) -> dict[str, Any] | None:
+        if item is None:
+            return None
+        if isinstance(item, dict):
+            return item
+        if hasattr(item, "__dict__"):
+            return vars(item)
+        return None
+
+    @classmethod
+    def _unwrap_provider_item(cls, item: Any) -> Any:
+        mapping = cls._coerce_mapping(item)
+        if mapping is None:
+            return item
+
+        if any(key in mapping for key in ("base_url", "api_keys", "model")):
+            return mapping
+
+        for key in ("config", "data", "payload", "provider", "provider_config", "value", "items"):
+            child = mapping.get(key)
+            child_mapping = cls._coerce_mapping(child)
+            if not child_mapping:
+                continue
+            if any(field in child_mapping for field in ("base_url", "api_keys", "model")):
+                return child_mapping
+            nested = cls._unwrap_provider_item(child_mapping)
+            nested_mapping = cls._coerce_mapping(nested)
+            if nested_mapping and any(field in nested_mapping for field in ("base_url", "api_keys", "model")):
+                return nested_mapping
+
+        if len(mapping) == 1:
+            only_value = next(iter(mapping.values()))
+            only_mapping = cls._coerce_mapping(only_value)
+            if only_mapping:
+                return cls._unwrap_provider_item(only_mapping)
+
+        return mapping
+
+    @classmethod
+    def _provider_item_to_dict(cls, item: Any) -> dict[str, str | list[str]] | None:
+        if item is None:
+            return None
+        unwrapped = cls._unwrap_provider_item(item)
+        if isinstance(unwrapped, dict):
+            base_url = str(cls._unwrap_config_value(unwrapped.get("base_url")) or "").strip()
+            api_keys = cls._normalize_api_keys(cls._unwrap_config_value(unwrapped.get("api_keys")))
+            model = str(cls._unwrap_config_value(unwrapped.get("model")) or "").strip()
+        else:
+            base_url = str(cls._unwrap_config_value(getattr(unwrapped, "base_url", None)) or "").strip()
+            api_keys = cls._normalize_api_keys(
+                cls._unwrap_config_value(getattr(unwrapped, "api_keys", None))
+            )
+            model = str(cls._unwrap_config_value(getattr(unwrapped, "model", None)) or "").strip()
+        if not base_url or not api_keys:
+            return None
+        return {"base_url": base_url, "api_keys": api_keys, "model": model}
+
+    @classmethod
+    def _iter_provider_items(cls, raw: Any):
+        queue: list[Any] = [raw]
+        seen_ids: set[int] = set()
+        while queue:
+            current = queue.pop(0)
+            if current is None:
+                continue
+
+            is_container = isinstance(current, (list, tuple, set, dict)) or hasattr(current, "__dict__")
+            if is_container:
+                current_id = id(current)
+                if current_id in seen_ids:
+                    continue
+                seen_ids.add(current_id)
+
+            if isinstance(current, (list, tuple, set)):
+                queue.extend(list(current))
+                continue
+
+            mapping = cls._coerce_mapping(current)
+            if mapping is None:
+                yield current
+                continue
+
+            yield mapping
+            for child in mapping.values():
+                if isinstance(child, (list, tuple, set, dict)) or hasattr(child, "__dict__"):
+                    queue.append(child)
+
+    @classmethod
+    def _normalize_provider_configs(cls, raw: Any) -> list[dict[str, str | list[str]]]:
+        out: list[dict[str, str | list[str]]] = []
+        seen: set[tuple[str, tuple[str, ...], str]] = set()
+        for item in cls._iter_provider_items(raw):
+            normalized = cls._provider_item_to_dict(item)
+            if normalized:
+                base_url = str(normalized.get("base_url") or "").strip()
+                model = str(normalized.get("model") or "").strip()
+                api_keys_raw = normalized.get("api_keys") or []
+                if isinstance(api_keys_raw, list):
+                    api_keys = tuple(str(v).strip() for v in api_keys_raw if str(v).strip())
+                elif isinstance(api_keys_raw, str):
+                    api_keys = (api_keys_raw.strip(),) if api_keys_raw.strip() else tuple()
+                else:
+                    api_keys = tuple()
+                dedupe_key = (base_url, api_keys, model)
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                out.append(normalized)
+        return out
+
+    @staticmethod
+    def _first_api_key(provider_config: dict[str, str | list[str]]) -> str:
+        api_keys = provider_config.get("api_keys") or []
+        if isinstance(api_keys, list) and api_keys:
+            return str(api_keys[0]).strip()
+        if isinstance(api_keys, str):
+            return api_keys.strip()
+        return ""
+
+    def normalize_provider_configs(self, raw: Any) -> list[dict[str, str | list[str]]]:
+        return self._normalize_provider_configs(raw)
+
+    async def _generate_with_openai_compatible(
+        self,
+        provider_config: dict[str, str | list[str]],
+        prompt: str,
+        timeout_seconds: int,
+    ) -> str:
+        base_url = self._normalize_base_url(str(provider_config.get("base_url") or ""))
+        api_key = self._first_api_key(provider_config)
+        model = str(provider_config.get("model") or "gpt-4o-mini").strip()
+        if not base_url or not api_key:
+            raise ValueError("服务商未填完整（需 API 地址、API Key、模型名称）")
+
+        post_url = base_url.rstrip("/") + "/chat/completions"
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+        body = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
+            "max_tokens": 4096,
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                post_url,
+                json=body,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=max(int(timeout_seconds), 1)),
+            ) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    raise RuntimeError(f"OpenAI 兼容接口返回 {resp.status}: {text[:300]}")
+                data = await resp.json()
+                choices = (data or {}).get("choices") or []
+                if not choices:
+                    raise RuntimeError("OpenAI 兼容接口未返回 choices")
+                message = choices[0].get("message") or {}
+                content = message.get("content") or ""
+                if isinstance(content, list):
+                    joined = []
+                    for part in content:
+                        if isinstance(part, dict):
+                            text = part.get("text")
+                            if text:
+                                joined.append(str(text))
+                    content = "\n".join(joined)
+                return str(content).strip()
+
+    async def _generate_with_provider(
+        self,
+        prompt: str,
+        session_id: str,
+        provider_id: str = "",
+        timeout_seconds: int = 90,
+        provider_configs: Any = None,
+    ) -> str:
+        """统一封装文本生成，支持显式 provider_id 或回退当前会话 provider。"""
+        provider_id = str(provider_id or "").strip()
+        timeout = max(int(timeout_seconds), 1)
+        normalized_provider_configs = self._normalize_provider_configs(provider_configs)
+
+        if normalized_provider_configs:
+            last_error: Exception | None = None
+            for provider_config in normalized_provider_configs:
+                try:
+                    return await self._generate_with_openai_compatible(
+                        provider_config=provider_config,
+                        prompt=prompt,
+                        timeout_seconds=timeout,
+                    )
+                except Exception as exc:
+                    last_error = exc
+                    logger.warning(
+                        "OpenAI 兼容智能分析服务商调用失败: model=%s, base_url=%s, error=%s",
+                        str(provider_config.get("model") or ""),
+                        self._normalize_base_url(str(provider_config.get("base_url") or "")),
+                        exc,
+                    )
+            if last_error:
+                raise last_error
+
+        if provider_id:
+            response = await asyncio.wait_for(
+                self.context.llm_generate(
+                    chat_provider_id=provider_id,
+                    prompt=prompt,
+                ),
+                timeout=timeout,
+            )
+            return (getattr(response, "completion_text", None) or "").strip()
+
+        provider = self._get_provider()
+        if not provider:
+            raise ValueError("未配置大模型提供商")
+
+        response = await asyncio.wait_for(
+            provider.text_chat(
+                prompt=prompt,
+                session_id=session_id,
+                persist=False,
+            ),
+            timeout=timeout,
+        )
+        return (getattr(response, "completion_text", None) or "").strip()
+
+    @staticmethod
+    def _provider_debug_info(provider: Any) -> dict[str, str]:
+        """提取可安全打印的 provider 调试信息，不包含密钥。"""
+        def first_attr(obj: Any, names: tuple[str, ...]) -> str:
+            for name in names:
+                value = getattr(obj, name, None)
+                if value:
+                    return str(value)
+            return ""
+
+        def mask_url(raw: str) -> str:
+            text = (raw or "").strip()
+            if not text:
+                return ""
+            try:
+                parsed = urlsplit(text)
+                if parsed.scheme and parsed.netloc:
+                    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+            except Exception:
+                pass
+            return text
+
+        return {
+            "provider_class": f"{provider.__class__.__module__}.{provider.__class__.__name__}",
+            "provider_name": first_attr(provider, ("name", "provider_name", "id")),
+            "model": first_attr(provider, ("model", "model_name", "default_model", "_model")),
+            "base_url": mask_url(first_attr(provider, ("base_url", "api_base", "endpoint", "host"))),
+        }
+
     async def get_news_summary(
         self,
         fund_name: str,
         fund_code: str,
+        provider_id: str = "",
+        timeout_seconds: int = 90,
+        provider_configs: Any = None,
     ) -> str:
         """
         获取基金相关新闻摘要（增强版，含季节性因素和国际形势）
@@ -52,8 +352,28 @@ class AIFundAnalyzer:
             新闻摘要文本
         """
         provider = self._get_provider()
-        if not provider:
+        normalized_provider_configs = self._normalize_provider_configs(provider_configs)
+        if not provider and not str(provider_id or "").strip() and not normalized_provider_configs:
             return "暂无法获取新闻资讯（未配置大模型）"
+        provider_info = (
+            {
+                "provider_class": "openai_compatible_config",
+                "provider_name": "",
+                "model": str(normalized_provider_configs[0].get("model") or ""),
+                "base_url": self._normalize_base_url(
+                    str(normalized_provider_configs[0].get("base_url") or "")
+                ),
+            }
+            if normalized_provider_configs
+            else self._provider_debug_info(provider)
+            if provider
+            else {
+                "provider_class": "configured_provider_id",
+                "provider_name": str(provider_id or "").strip(),
+                "model": "",
+                "base_url": "",
+            }
+        )
 
         # 获取影响因素
         factors = self.factors.get_factors(fund_name)
@@ -77,12 +397,33 @@ class AIFundAnalyzer:
         )
 
         try:
-            response = await provider.text_chat(
+            started_at = perf_counter()
+            logger.info(
+                "开始获取新闻摘要: %s(%s), prompt_length=%s, provider=%s, model=%s, base_url=%s, configured_provider_id=%s, timeout=%ss",
+                fund_name,
+                fund_code,
+                len(prompt),
+                provider_info["provider_class"],
+                provider_info["model"] or provider_info["provider_name"] or "unknown",
+                provider_info["base_url"] or "unknown",
+                str(provider_id or "").strip() or "<session-default>",
+                timeout_seconds,
+            )
+            output = await self._generate_with_provider(
                 prompt=prompt,
                 session_id=f"fund_news_{fund_code}_{datetime.now().strftime('%Y%m%d')}",
-                persist=False,
+                provider_id=provider_id,
+                timeout_seconds=timeout_seconds,
+                provider_configs=provider_configs,
             )
-            return response.completion_text
+            logger.info(
+                "新闻摘要获取完成: %s(%s), elapsed=%.2fs, output_length=%s",
+                fund_name,
+                fund_code,
+                perf_counter() - started_at,
+                len(output),
+            )
+            return output
         except Exception as e:
             logger.warning(f"获取新闻摘要失败: {e}")
             return "暂无法获取最新新闻资讯"
@@ -94,6 +435,9 @@ class AIFundAnalyzer:
         technical_indicators: dict[str, Any],
         user_id: str,
         fund_flow_text: str = "",
+        provider_id: str = "",
+        timeout_seconds: int = 90,
+        provider_configs: Any = None,
     ) -> str:
         """
         执行 AI 智能分析（含量化数据和资金流向）
@@ -109,8 +453,42 @@ class AIFundAnalyzer:
             分析结果文本
         """
         provider = self._get_provider()
-        if not provider:
+        normalized_provider_configs = self._normalize_provider_configs(provider_configs)
+        if not provider and not str(provider_id or "").strip() and not normalized_provider_configs:
             raise ValueError("未配置大模型提供商")
+        provider_info = (
+            {
+                "provider_class": "openai_compatible_config",
+                "provider_name": "",
+                "model": str(normalized_provider_configs[0].get("model") or ""),
+                "base_url": self._normalize_base_url(
+                    str(normalized_provider_configs[0].get("base_url") or "")
+                ),
+            }
+            if normalized_provider_configs
+            else self._provider_debug_info(provider)
+            if provider
+            else {
+                "provider_class": "configured_provider_id",
+                "provider_name": str(provider_id or "").strip(),
+                "model": "",
+                "base_url": "",
+            }
+        )
+
+        started_at = perf_counter()
+        logger.info(
+            "开始 AI 智能分析: %s(%s), history_count=%s, flow_text_length=%s, provider=%s, model=%s, base_url=%s, configured_provider_id=%s, timeout=%ss",
+            fund_info.name,
+            fund_info.code,
+            len(history_data),
+            len(fund_flow_text or ""),
+            provider_info["provider_class"],
+            provider_info["model"] or provider_info["provider_name"] or "unknown",
+            provider_info["base_url"] or "unknown",
+            str(provider_id or "").strip() or "<session-default>",
+            timeout_seconds,
+        )
 
         # 1. 计算量化绩效指标
         performance = self.quant.calculate_performance(history_data)
@@ -119,14 +497,17 @@ class AIFundAnalyzer:
             if performance
             else "历史数据不足，无法计算绩效指标"
         )
+        logger.info("AI 智能分析阶段完成: 绩效指标已计算 - %s(%s)", fund_info.name, fund_info.code)
 
         # 2. 计算全部技术指标
         tech_indicators = self.quant.calculate_all_indicators(history_data)
         tech_indicators_text = self.quant.format_indicators_text(tech_indicators)
+        logger.info("AI 智能分析阶段完成: 技术指标已计算 - %s(%s)", fund_info.name, fund_info.code)
 
         # 3. 运行策略回测
         backtest_results = self.quant.run_all_backtests(history_data)
         backtest_summary = self.quant.format_backtest_text(backtest_results)
+        logger.info("AI 智能分析阶段完成: 策略回测已完成 - %s(%s)", fund_info.name, fund_info.code)
 
         # 4. 获取影响因素文本
         factors_text = self.factors.format_factors_text(fund_info.name)
@@ -138,7 +519,14 @@ class AIFundAnalyzer:
         history_summary = self.prompt_builder.format_history_summary(history_data)
 
         # 7. 获取新闻摘要（含国际形势）
-        news_summary = await self.get_news_summary(fund_info.name, fund_info.code)
+        news_summary = await self.get_news_summary(
+            fund_name=fund_info.name,
+            fund_code=fund_info.code,
+            provider_id=provider_id,
+            timeout_seconds=timeout_seconds,
+            provider_configs=provider_configs,
+        )
+        logger.info("AI 智能分析阶段完成: 新闻摘要已就绪 - %s(%s)", fund_info.name, fund_info.code)
 
         # 8. 构建分析提示词（使用新模板，含国际形势和资金流向）
         analysis_prompt = self._build_quant_analysis_prompt(
@@ -152,15 +540,31 @@ class AIFundAnalyzer:
             global_situation_text=global_situation_text,
             fund_flow_text=fund_flow_text,
         )
-
-        # 9. 调用大模型分析
-        response = await provider.text_chat(
-            prompt=analysis_prompt,
-            session_id=f"fund_analysis_{fund_info.code}_{user_id}",
-            persist=False,
+        logger.info(
+            "AI 智能分析阶段完成: 主分析提示词已构建 - %s(%s), prompt_length=%s",
+            fund_info.name,
+            fund_info.code,
+            len(analysis_prompt),
         )
 
-        return response.completion_text
+        # 9. 调用大模型分析
+        logger.info("开始调用主分析模型: %s(%s)", fund_info.name, fund_info.code)
+        output = await self._generate_with_provider(
+            prompt=analysis_prompt,
+            session_id=f"fund_analysis_{fund_info.code}_{user_id}",
+            provider_id=provider_id,
+            timeout_seconds=timeout_seconds,
+            provider_configs=provider_configs,
+        )
+        logger.info(
+            "主分析模型返回成功: %s(%s), elapsed=%.2fs, output_length=%s",
+            fund_info.name,
+            fund_info.code,
+            perf_counter() - started_at,
+            len(output),
+        )
+
+        return output
 
     def _build_quant_analysis_prompt(
         self,

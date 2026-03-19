@@ -9,6 +9,7 @@ from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.message_components import At
 from astrbot.api.star import Context, StarTools
 
+from .config_utils import ensure_flat_config
 from .fund_analyzer import AIFundAnalyzer
 from .fund_analysis_utils import can_handle_stock_extension, handle_stock_extension_command
 from .fund_stock import DebateEngine, StockAnalyzer as AkStockAnalyzer
@@ -208,13 +209,29 @@ class StockModule:
 
     def __init__(self, context: Context, config: AstrBotConfig):
         self.context = context
-        self.config = config
+        self.config = ensure_flat_config(config)
         self._scheduler = None
         self._last_reminder_tick: str | None = None
         self._ai_analyzer: AIFundAnalyzer | None = None
         self._debate_engine: DebateEngine | None = None
         self._start_scheduler()
         logger.info("股票模块初始化完成（股票行情通过 AKShare 获取）")
+
+    def refresh_runtime(self, context: Context, config: AstrBotConfig) -> None:
+        """刷新运行期上下文与配置，避免单例持有旧配置。"""
+        self.context = context
+        self.config = ensure_flat_config(config)
+        if self._ai_analyzer is not None:
+            self._ai_analyzer.context = context
+        if self._debate_engine is not None:
+            self._debate_engine.context = context
+
+    @staticmethod
+    def _safe_int(value: object, default: int) -> int:
+        try:
+            return int(str(value))
+        except Exception:
+            return default
 
     @property
     def ai_analyzer(self) -> AIFundAnalyzer:
@@ -793,8 +810,41 @@ class StockModule:
         yield event.plain_result(f"{header}\n{report}\n\n提示：量化指标基于 A 股历史数据，不代表未来表现。")
 
     async def _handle_stock_ai_analysis(self, event: AstrMessageEvent, args: list[str]):
+        runtime_config = ensure_flat_config(getattr(self.context, "config", None) or self.config)
+
         provider = self.context.get_using_provider()
-        if not provider:
+        stock_provider_id = str(getattr(runtime_config, "stock_ai_provider_id", "") or "").strip()
+        stock_provider_configs_raw = getattr(runtime_config, "stock_ai_providers", None)
+        fund_provider_id = str(getattr(runtime_config, "fund_ai_provider_id", "") or "").strip()
+        fund_provider_configs_raw = getattr(runtime_config, "fund_ai_providers", None)
+        stock_provider_configs = self.ai_analyzer.normalize_provider_configs(stock_provider_configs_raw)
+        fund_provider_configs = self.ai_analyzer.normalize_provider_configs(fund_provider_configs_raw)
+        provider_id = stock_provider_id or fund_provider_id
+        provider_configs = stock_provider_configs or fund_provider_configs
+        if stock_provider_configs_raw and not stock_provider_configs:
+            logger.warning(
+                "股票智能分析服务商配置解析为空: stock_raw_type=%s",
+                type(stock_provider_configs_raw).__name__,
+            )
+            yield event.plain_result(
+                "股票智能分析服务商配置未被正确识别，请重新保存一次“股票智能分析服务商”的 API 地址、API Key 和模型名。"
+            )
+            return
+        if not stock_provider_configs and not stock_provider_id and fund_provider_configs_raw and not fund_provider_configs:
+            logger.warning(
+                "基金智能分析服务商配置解析为空（股票兜底）: fund_raw_type=%s",
+                type(fund_provider_configs_raw).__name__,
+            )
+            yield event.plain_result(
+                "基金智能分析服务商配置未被正确识别，请重新保存一次“基金智能分析服务商”的 API 地址、API Key 和模型名。"
+            )
+            return
+        timeout_seconds = self._safe_int(
+            getattr(runtime_config, "stock_ai_timeout_seconds", None)
+            or getattr(runtime_config, "fund_ai_timeout_seconds", 90),
+            90,
+        )
+        if not provider and not provider_id and not provider_configs:
             yield event.plain_result("当前没有配置大模型提供商，无法执行股票智能分析。")
             return
 
@@ -804,13 +854,39 @@ class StockModule:
             return
 
         logger.info("开始执行股票智能分析: %s", stock_code)
+        logger.info(
+            "股票智能分析模型配置来源: %s, provider_id=%s, provider_configs=%s, timeout=%ss",
+            "stock"
+            if stock_provider_id or stock_provider_configs
+            else "fund"
+            if fund_provider_id or fund_provider_configs
+            else "session-default",
+            provider_id or "<session-default>",
+            "yes" if provider_configs else "no",
+            timeout_seconds,
+        )
+        logger.info(
+            "股票智能分析 provider 配置解析: stock_raw_type=%s, stock_count=%s, fund_raw_type=%s, fund_count=%s",
+            type(stock_provider_configs_raw).__name__ if stock_provider_configs_raw is not None else "None",
+            len(stock_provider_configs),
+            type(fund_provider_configs_raw).__name__ if fund_provider_configs_raw is not None else "None",
+            len(fund_provider_configs),
+        )
         yield event.plain_result(f"正在分析 {stock_code} 的行情、历史走势和资金流，通常需要 10 到 60 秒，请稍等。")
 
         analyzer = _get_ak_stock_analyzer()
+        logger.info("股票智能分析开始拉取基础数据: %s", stock_code)
         info, history, flow_data = await asyncio.gather(
             analyzer.get_stock_realtime(stock_code),
             analyzer.get_stock_history(stock_code, days=90),
             analyzer.get_stock_fund_flow(stock_code, days=10),
+        )
+        logger.info(
+            "股票智能分析基础数据拉取完成: %s, realtime=%s, history_count=%s, flow_count=%s",
+            stock_code,
+            "ok" if info else "missing",
+            len(history),
+            len(flow_data),
         )
         if not info:
             yield event.plain_result(f"无法获取股票 {stock_code} 的实时信息。")
@@ -825,15 +901,26 @@ class StockModule:
             return
 
         technical_indicators = self.ai_analyzer.quant.calculate_all_indicators(history)
+        logger.info(
+            "股票智能分析技术指标已计算: %s, signal=%s, trend_score=%s",
+            stock_code,
+            technical_indicators.signal,
+            technical_indicators.trend_score,
+        )
         flow_text = self._format_stock_flow_text(flow_data)
         try:
+            logger.info("股票智能分析开始调用 AI 分析器: %s", stock_code)
             report = await self.ai_analyzer.analyze(
                 fund_info=info,
                 history_data=history,
                 technical_indicators={},
                 user_id=str(getattr(event, "get_sender_id", lambda: "default")() or "default"),
                 fund_flow_text=flow_text,
+                provider_id=provider_id,
+                timeout_seconds=timeout_seconds,
+                provider_configs=provider_configs,
             )
+            logger.info("股票智能分析 AI 分析器返回成功: %s, report_length=%s", stock_code, len(report))
         except Exception as exc:
             logger.error("股票智能分析失败: %s", exc)
             if "timed out" in str(exc).lower() or "timeout" in str(exc).lower():
@@ -963,6 +1050,8 @@ def init_stock_module(context: Context, config: AstrBotConfig) -> StockModule:
     global _stock_module
     if _stock_module is None:
         _stock_module = StockModule(context, config)
+    else:
+        _stock_module.refresh_runtime(context, config)
     return _stock_module
 
 

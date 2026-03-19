@@ -11,6 +11,7 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.star import Context, StarTools
 
+from .config_utils import ensure_flat_config
 from .eastmoney_api import get_api as get_eastmoney_api
 from .fund_analyzer import AIFundAnalyzer, QuantAnalyzer
 from .fund_stock import DebateEngine, StockAnalyzer
@@ -167,6 +168,7 @@ class FundAnalysisModule:
 
     def __init__(self, context: Context):
         self.context = context
+        self.config = ensure_flat_config(getattr(context, "config", {}))
         self.market = FundMarketService()
         self.stock_analyzer = StockAnalyzer()
         self._ai_analyzer: AIFundAnalyzer | None = None
@@ -174,6 +176,14 @@ class FundAnalysisModule:
         self._data_dir = Path(StarTools.get_data_dir("astrbot_stock"))
         self._data_dir.mkdir(parents=True, exist_ok=True)
         self.user_fund_settings = self._load_user_settings()
+
+    def refresh_runtime(self, context: Context) -> None:
+        self.context = context
+        self.config = ensure_flat_config(getattr(context, "config", {}))
+        if self._ai_analyzer is not None:
+            self._ai_analyzer.context = context
+        if self._debate_engine is not None:
+            self._debate_engine.context = context
 
     @property
     def ai_analyzer(self) -> AIFundAnalyzer:
@@ -238,6 +248,13 @@ class FundAnalysisModule:
             self._safe_sender_id(event),
             self.market.DEFAULT_FUND_CODE,
         )
+
+    @staticmethod
+    def _safe_int(value: Any, default: int) -> int:
+        try:
+            return int(str(value))
+        except Exception:
+            return default
 
     @staticmethod
     def _fmt_number(value: float | None, digits: int = 4, suffix: str = "") -> str:
@@ -563,8 +580,24 @@ class FundAnalysisModule:
 
     async def _handle_ai_analysis(self, event: AstrMessageEvent, args: list[str]):
         provider = self.context.get_using_provider()
-        if not provider:
+        provider_id = str(getattr(self.config, "fund_ai_provider_id", "") or "").strip()
+        provider_configs_raw = getattr(self.config, "fund_ai_providers", None)
+        provider_configs = self.ai_analyzer.normalize_provider_configs(provider_configs_raw)
+        timeout_seconds = self._safe_int(
+            getattr(self.config, "fund_ai_timeout_seconds", 90),
+            90,
+        )
+        if not provider and not provider_id and not provider_configs:
             yield event.plain_result("当前没有配置大模型提供商，无法执行智能分析。")
+            return
+        if provider_configs_raw and not provider_configs:
+            logger.warning(
+                "基金智能分析服务商配置解析为空: raw_type=%s",
+                type(provider_configs_raw).__name__,
+            )
+            yield event.plain_result(
+                "基金智能分析服务商配置未被正确识别，请重新保存一次“基金智能分析服务商”的 API 地址、API Key 和模型名。"
+            )
             return
         fund_code = self._resolve_fund_code(event, args)
         info, history = await asyncio.gather(
@@ -589,10 +622,16 @@ class FundAnalysisModule:
                 technical_indicators=indicators,
                 user_id=self._safe_sender_id(event),
                 fund_flow_text=fund_flow_text,
+                provider_id=provider_id,
+                timeout_seconds=timeout_seconds,
+                provider_configs=provider_configs,
             )
         except Exception as exc:
             logger.error("智能分析失败: %s", exc)
-            yield event.plain_result(f"智能分析失败：{exc}")
+            if "timed out" in str(exc).lower() or "timeout" in str(exc).lower():
+                yield event.plain_result("智能分析失败：大模型请求超时，请检查基金智能分析专用 Provider 配置或稍后重试。")
+            else:
+                yield event.plain_result(f"智能分析失败：{exc}")
             return
         signal, score = self.ai_analyzer.get_technical_signal(history)
         header = (
@@ -672,6 +711,8 @@ def init_fund_analysis_module(context: Context) -> FundAnalysisModule:
     global _fund_analysis_module
     if _fund_analysis_module is None:
         _fund_analysis_module = FundAnalysisModule(context)
+    else:
+        _fund_analysis_module.refresh_runtime(context)
     return _fund_analysis_module
 
 

@@ -132,7 +132,7 @@
   },
   "stock": {
     "description": "股票与自选股",
-    "hint": "定时提醒时区等。",
+    "hint": "定时提醒、股票智能分析专用模型等。",
     "type": "object",
     "items": {
       "stock_reminder_timezone": {
@@ -140,6 +140,99 @@
         "type": "string",
         "hint": "例如 Asia/Shanghai",
         "default": "Asia/Shanghai"
+      },
+      "stock_ai_provider_id": {
+        "description": "股票智能分析专用 Provider ID",
+        "type": "string",
+        "hint": "备用方案：填写 AstrBot 中已配置的聊天模型 Provider ID。若已配置下方“股票智能分析服务商”，则优先使用服务商配置。",
+        "default": ""
+      },
+      "stock_ai_providers": {
+        "description": "股票智能分析服务商（可添加多个）",
+        "type": "template_list",
+        "hint": "像 OCR 一样直接填写 API 地址、API Key、模型名。按列表顺序尝试，第一个失败则用下一个。",
+        "templates": {
+          "openai_text": {
+            "name": "OpenAI 兼容（文本）",
+            "items": {
+              "base_url": {
+                "type": "string",
+                "description": "API 地址",
+                "hint": "例如 https://api.siliconflow.cn/v1 或其他 OpenAI 兼容地址",
+                "default": "https://api.siliconflow.cn/v1"
+              },
+              "api_keys": {
+                "type": "list",
+                "description": "API Key",
+                "default": [],
+                "obvious_hint": true
+              },
+              "model": {
+                "type": "string",
+                "description": "模型名称",
+                "hint": "例如 Qwen/QwQ、DeepSeek、gpt-4o-mini 等文本模型",
+                "default": "Qwen/Qwen2.5-72B-Instruct"
+              }
+            }
+          }
+        }
+      },
+      "stock_ai_timeout_seconds": {
+        "description": "股票智能分析模型超时（秒）",
+        "type": "int",
+        "hint": "股票智能分析调用大模型的最大等待时间。模型较慢或走海外接口时可适当调大。",
+        "slider": { "min": 30, "max": 300, "step": 5 },
+        "default": 90
+      }
+    }
+  },
+  "fund": {
+    "description": "基金分析",
+    "hint": "基金智能分析专用模型等。",
+    "type": "object",
+    "items": {
+      "fund_ai_provider_id": {
+        "description": "基金智能分析专用 Provider ID",
+        "type": "string",
+        "hint": "备用方案：填写 AstrBot 中已配置的聊天模型 Provider ID。若已配置下方“基金智能分析服务商”，则优先使用服务商配置。",
+        "default": ""
+      },
+      "fund_ai_providers": {
+        "description": "基金智能分析服务商（可添加多个）",
+        "type": "template_list",
+        "hint": "像 OCR 一样直接填写 API 地址、API Key、模型名。按列表顺序尝试，第一个失败则用下一个。",
+        "templates": {
+          "openai_text": {
+            "name": "OpenAI 兼容（文本）",
+            "items": {
+              "base_url": {
+                "type": "string",
+                "description": "API 地址",
+                "hint": "例如 https://api.siliconflow.cn/v1 或其他 OpenAI 兼容地址",
+                "default": "https://api.siliconflow.cn/v1"
+              },
+              "api_keys": {
+                "type": "list",
+                "description": "API Key",
+                "default": [],
+                "obvious_hint": true
+              },
+              "model": {
+                "type": "string",
+                "description": "模型名称",
+                "hint": "例如 Qwen/QwQ、DeepSeek、gpt-4o-mini 等文本模型",
+                "default": "Qwen/Qwen2.5-72B-Instruct"
+              }
+            }
+          }
+        }
+      },
+      "fund_ai_timeout_seconds": {
+        "description": "基金智能分析模型超时（秒）",
+        "type": "int",
+        "hint": "基金智能分析调用大模型的最大等待时间。模型较慢或走海外接口时可适当调大。",
+        "slider": { "min": 30, "max": 300, "step": 5 },
+        "default": 90
       }
     }
   },
