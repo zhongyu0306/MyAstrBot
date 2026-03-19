@@ -24,6 +24,7 @@ from .stock_utils import (
     _search_code_by_name,
     handle_stock_command,
 )
+from .fund_analysis_utils import handle_fund_command
 from .weather_utils import _get_weather_config, _query_weather_text, handle_weather_command, handle_weather_help
 from .epic_utils import handle_epic_command, handle_epic_help
 from .bookkeeping_utils import (
@@ -76,6 +77,11 @@ from .email_subscription_utils import (
     handle_subscribe_command,
     handle_unsubscribe_command,
     handle_list_subscriptions_command,
+)
+from .memory_utils import (
+    handle_memory_command,
+    handle_who_am_i_command,
+    init_user_memory_store,
 )
 
 
@@ -132,6 +138,8 @@ class AllCharPlugin(Star):
         init_simple_reminder_center(self.context, self.config)
         # 初始化邮件订阅定时发送中心（持久化订阅 + 每日到点发送）
         init_email_subscription_center(self.context, self.config)
+        # 初始化用户永久记忆存储
+        init_user_memory_store()
 
         # 注册一批可供 Agent 自动调用的工具（类似 astrbot_plugin_payqr）
         try:
@@ -210,11 +218,30 @@ class AllCharPlugin(Star):
         async for result in handle_simple_reminder(wrapped, self.context, self.config):
             yield result
 
+    # ---------------- 用户永久记忆 ----------------
+
+    @filter.command("记忆", alias={"认人"})
+    async def cmd_memory(self, event: AstrMessageEvent):
+        async for result in handle_memory_command(event):
+            yield result
+
+    @filter.command("我是谁")
+    async def cmd_who_am_i(self, event: AstrMessageEvent):
+        async for result in handle_who_am_i_command(event):
+            yield result
+
     # ---------------- 股票 ----------------
 
     @filter.command("stock", alias={"股票", "自选股", "行情"})
     async def cmd_stock(self, event: AstrMessageEvent):
+        # 避免长耗时股票分析在后台执行时，同一条消息又继续走自然语言链路。
+        event.stop_event()
         async for result in handle_stock_command(event, self.context, self.config):
+            yield result
+
+    @filter.command("基金", alias={"fund"})
+    async def cmd_fund(self, event: AstrMessageEvent):
+        async for result in handle_fund_command(event, self.context):
             yield result
 
     # ---------------- 天气 ----------------
@@ -229,18 +256,6 @@ class AllCharPlugin(Star):
     @filter.command("help_nyweather", alias={"天气帮助"})
     async def cmd_weather_help(self, event: AstrMessageEvent):
         async for result in handle_weather_help(event):
-            yield result
-
-    # ---------------- Epic 免费游戏 ----------------
-
-    @filter.command("epic", alias={"Epic免费", "epic免费", "喜加一", "e宝"})
-    async def cmd_epic(self, event: AstrMessageEvent):
-        async for result in handle_epic_command(event, self.config):
-            yield result
-
-    @filter.command("help_epic", alias={"Epic帮助", "epic帮助"})
-    async def cmd_epic_help(self, event: AstrMessageEvent):
-        async for result in handle_epic_help(event):
             yield result
 
     # ---------------- OCR 图片识别 ----------------
@@ -405,6 +420,21 @@ class AllCharPlugin(Star):
         """查看当前用户的邮件订阅列表。"""
         async for result in handle_list_subscriptions_command(event, self.config):
             yield result
+
+    @filter.on_llm_request()
+    async def inject_user_memory(self, event: AstrMessageEvent, req):
+        """
+        在普通聊天进入大模型前注入当前 QQ 的永久记忆。
+        """
+        store = init_user_memory_store()
+        store.observe_user(event)
+        memory_prompt = store.build_prompt_for_event(event)
+        if not memory_prompt:
+            return
+
+        base_prompt = getattr(req, "system_prompt", "") or ""
+        joiner = "\n\n" if base_prompt else ""
+        req.system_prompt = f"{base_prompt}{joiner}{memory_prompt}"
 
     # ---------------- LLM Tools（供 AI 自动调用） ----------------
 

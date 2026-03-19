@@ -4,12 +4,14 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-import aiohttp
-
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.message_components import At
 from astrbot.api.star import Context, StarTools
+
+from .fund_analyzer import AIFundAnalyzer
+from .fund_analysis_utils import can_handle_stock_extension, handle_stock_extension_command
+from .fund_stock import DebateEngine, StockAnalyzer as AkStockAnalyzer
 
 
 def _data_dir():
@@ -69,18 +71,6 @@ def _normalize_code(code: str) -> str:
     return ""
 
 
-def _to_sina_code(six_digit: str) -> str:
-    """6 位代码转新浪格式：sh600519 / sz000001"""
-    if not six_digit or len(six_digit) < 5:
-        return ""
-    n = six_digit[:6].zfill(6)
-    if n[0] == "6":
-        return "sh" + n
-    if n[0] in "03":
-        return "sz" + n
-    return ""
-
-
 def _load_watchlist() -> dict:
     path = _watchlist_file()
     if not path.exists():
@@ -101,83 +91,14 @@ def _save_watchlist(data: dict) -> None:
         logger.error("保存自选数据失败: %s", e)
 
 
-SINA_HQ = "https://hq.sinajs.cn/list="
-SINA_REFERER = "https://finance.sina.com.cn/"
+_ak_stock_analyzer: AkStockAnalyzer | None = None
 
 
-async def _fetch_sina_quotes(sina_codes: list[str]) -> list[dict]:
-    """异步请求新浪行情，使用 aiohttp，返回 list[dict]。"""
-    if not sina_codes:
-        return []
-    url = SINA_HQ + ",".join(sina_codes)
-    result: list[dict] = []
-    try:
-        timeout = aiohttp.ClientTimeout(total=10)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url, headers={"Referer": SINA_REFERER}) as resp:
-                if resp.status != 200:
-                    logger.warning("新浪行情请求失败，HTTP %s", resp.status)
-                    return []
-                raw = await resp.text(encoding="gbk", errors="replace")
-    except asyncio.TimeoutError:
-        logger.warning("新浪行情请求超时")
-        return []
-    except Exception as e:
-        logger.warning("新浪行情请求异常: %s", e)
-        return []
-
-    for line in raw.split("\n"):
-        line = line.strip()
-        if "var hq_str_" not in line or "=" not in line:
-            continue
-        try:
-            i = line.index("=")
-            code_key = line[line.index("var hq_str_") + 10 : i].strip()
-            rest = line[i + 1 :].strip().strip('";')
-            if rest.startswith('"'):
-                rest = rest[1:]
-            if rest.endswith('";'):
-                rest = rest[:-2]
-            parts = rest.split(",")
-            if len(parts) < 4:
-                continue
-            name = parts[0].strip()
-            try:
-                open_price = float(parts[1]) if len(parts) > 1 and parts[1] else 0.0
-                prev = float(parts[2])
-                curr = float(parts[3])
-            except (ValueError, IndexError):
-                continue
-            change = curr - prev if prev else 0
-            pct = (change / prev * 100) if prev else 0
-            code_6 = re.sub(r"\D", "", code_key)[:6].zfill(6)
-            result.append(
-                {
-                    "code": code_6,
-                    "name": name or code_6,
-                    "current": curr,
-                    "open": open_price or prev,
-                    "prev_close": prev,
-                    "change": change,
-                    "change_pct": pct,
-                    "high": float(parts[4]) if len(parts) > 4 else curr,
-                    "low": float(parts[5]) if len(parts) > 5 else curr,
-                }
-            )
-        except Exception as e:
-            logger.debug("新浪解析行失败: %s", e)
-            continue
-    return result
-
-
-def _fetch_akshare_spot_sync():
-    """已废弃：保留空壳以兼容旧代码，不再实际访问 AkShare。"""
-    raise ImportError("AkShare 功能已禁用")
-
-
-def _fetch_akshare_quotes_sync(codes: list[str]) -> list[dict]:
-    """已废弃：不再通过 AkShare 获取行情。"""
-    raise ImportError("AkShare 功能已禁用")
+def _get_ak_stock_analyzer() -> AkStockAnalyzer:
+    global _ak_stock_analyzer
+    if _ak_stock_analyzer is None:
+        _ak_stock_analyzer = AkStockAnalyzer()
+    return _ak_stock_analyzer
 
 
 def _search_code_by_name_sync(keyword: str, max_results: int = 5) -> list[dict]:
@@ -204,18 +125,58 @@ def _search_code_by_name_sync(keyword: str, max_results: int = 5) -> list[dict]:
 
 
 async def _search_code_by_name(keyword: str, max_results: int = 5) -> list[dict]:
+    kw = (keyword or "").strip()
+    if not kw:
+        return []
+    try:
+        analyzer = _get_ak_stock_analyzer()
+        results = await analyzer.search_stock(kw, max_results=max_results)
+        matches = [
+            {"code": str(item.get("code", "")).strip(), "name": str(item.get("name", "")).strip()}
+            for item in results
+            if item.get("code")
+        ]
+        if matches:
+            return matches
+    except ImportError:
+        logger.warning("股票名称搜索依赖 akshare/pandas，当前未安装，退回本地缓存搜索。")
+    except Exception as e:
+        logger.warning("通过 AKShare 搜索股票名称失败，退回本地缓存: %s", e)
     return await asyncio.to_thread(_search_code_by_name_sync, keyword, max_results)
 
 
 async def _fetch_quotes(codes: list[str]) -> list[dict]:
-    """统一入口：仅使用新浪行情源获取报价。"""
+    """统一入口：优先通过 AKShare 获取股票实时行情。"""
     if not codes:
         return []
     codes = list(dict.fromkeys(codes))
-    sina_codes = [_to_sina_code(c) for c in codes if _to_sina_code(c)]
-    if not sina_codes:
+    try:
+        analyzer = _get_ak_stock_analyzer()
+        infos = await asyncio.gather(*(analyzer.get_stock_realtime(code) for code in codes))
+        quotes: list[dict] = []
+        for info in infos:
+            if info is None:
+                continue
+            quotes.append(
+                {
+                    "code": info.code,
+                    "name": info.name or info.code,
+                    "current": info.latest_price,
+                    "open": info.open_price,
+                    "prev_close": info.prev_close,
+                    "change": info.change_amount,
+                    "change_pct": info.change_rate,
+                    "high": info.high_price,
+                    "low": info.low_price,
+                }
+            )
+        return quotes
+    except ImportError:
+        logger.warning("股票行情依赖 akshare/pandas，当前未安装。")
         return []
-    return await _fetch_sina_quotes(sina_codes)
+    except Exception as e:
+        logger.warning("通过 AKShare 获取股票行情失败: %s", e)
+        return []
 
 
 def _format_quotes(quotes: list[dict], title: str = "行情") -> str:
@@ -250,15 +211,77 @@ class StockModule:
         self.config = config
         self._scheduler = None
         self._last_reminder_tick: str | None = None
+        self._ai_analyzer: AIFundAnalyzer | None = None
+        self._debate_engine: DebateEngine | None = None
         self._start_scheduler()
-        logger.info("股票模块初始化完成（使用新浪行情，无 AkShare 依赖）")
+        logger.info("股票模块初始化完成（股票行情通过 AKShare 获取）")
+
+    @property
+    def ai_analyzer(self) -> AIFundAnalyzer:
+        if self._ai_analyzer is None:
+            self._ai_analyzer = AIFundAnalyzer(self.context)
+        return self._ai_analyzer
+
+    @property
+    def debate_engine(self) -> DebateEngine:
+        if self._debate_engine is None:
+            self._debate_engine = DebateEngine(self.context)
+        return self._debate_engine
+
+    async def _resolve_stock_target(
+        self,
+        query: str | None,
+    ) -> tuple[str | None, str | None]:
+        """将股票代码或名称解析为唯一股票代码。"""
+        raw = (query or "").strip()
+        if not raw:
+            return None, "请提供股票代码或名称，例如 /股票 智能分析 600519"
+
+        code = _normalize_code(raw)
+        if code:
+            return code, None
+
+        matches = await _search_code_by_name(raw, max_results=5)
+        if not matches:
+            return None, f"未找到名称包含「{raw}」的股票，请改用代码试试。"
+        if len(matches) > 1:
+            lines = ["找到多只匹配的股票，请改用代码分析："]
+            for item in matches:
+                lines.append(f"  • {item['name']}（{item['code']}）")
+            return None, "\n".join(lines)
+        return matches[0]["code"], None
+
+    @staticmethod
+    def _format_stock_flow_text(flow_data: list[dict]) -> str:
+        """格式化股票资金流向，供 AI 深度分析使用。"""
+        if not flow_data:
+            return "暂无个股资金流向数据"
+
+        def fmt_amount(value: float) -> str:
+            abs_value = abs(value)
+            if abs_value >= 1e8:
+                return f"{value / 1e8:+.2f}亿"
+            if abs_value >= 1e4:
+                return f"{value / 1e4:+.2f}万"
+            return f"{value:+.0f}"
+
+        lines = ["【近10日个股资金流向】"]
+        for item in flow_data[-10:]:
+            lines.append(
+                f"- {item.get('date', '--')}: 主力{fmt_amount(float(item.get('main_net_inflow', 0) or 0))}，"
+                f"超大单{fmt_amount(float(item.get('super_large_inflow', 0) or 0))}，"
+                f"大单{fmt_amount(float(item.get('large_inflow', 0) or 0))}，"
+                f"中单{fmt_amount(float(item.get('medium_inflow', 0) or 0))}，"
+                f"小单{fmt_amount(float(item.get('small_inflow', 0) or 0))}"
+            )
+        return "\n".join(lines)
 
     def _start_scheduler(self):
         try:
             from apscheduler.schedulers.asyncio import AsyncIOScheduler
             from apscheduler.triggers.cron import CronTrigger
 
-            tz = getattr(self.config, "stock_reminder_timezone", "Asia/Shanghai")
+            tz = getattr(self.config, "stock_reminder_timezone", None) or "Asia/Shanghai"
             self._scheduler = AsyncIOScheduler(timezone=tz)
             self._scheduler.add_job(
                 self._run_reminders,
@@ -435,10 +458,26 @@ class StockModule:
         msg = event.get_message_str().strip()
         parts = msg.split()
         if len(parts) < 2:
-            async for r in self._send_help(event):
+            async for r in self._send_help_v2(event):
                 yield r
             return
         cmd, args = parts[1].strip().lower(), parts[2:] if len(parts) > 2 else []
+        if cmd == "量化分析":
+            async for r in self._handle_stock_quant_analysis(event, args):
+                yield r
+            return
+        if cmd == "智能分析":
+            async for r in self._handle_stock_ai_analysis(event, args):
+                yield r
+            return
+        if cmd == "股票智能分析":
+            async for r in self._handle_stock_multi_agent_analysis(event, args):
+                yield r
+            return
+        if can_handle_stock_extension(cmd):
+            async for r in handle_stock_extension_command(event, self.context, cmd, args):
+                yield r
+            return
         session_id = getattr(event, "unified_msg_origin", None) or getattr(event, "session_id", "")
         if not session_id:
             yield event.plain_result("❌ 无法获取当前会话。")
@@ -713,11 +752,153 @@ class StockModule:
             yield event.plain_result(f"✅ 已取消 {code} 的价格提醒。")
 
         elif cmd in ("帮助", "help", "?"):
-            async for r in self._send_help(event):
+            async for r in self._send_help_v2(event):
                 yield r
         else:
-            async for r in self._send_help(event):
+            async for r in self._send_help_v2(event):
                 yield r
+
+    async def _handle_stock_quant_analysis(self, event: AstrMessageEvent, args: list[str]):
+        stock_code, error = await self._resolve_stock_target(args[0] if args else None)
+        if error:
+            yield event.plain_result(error)
+            return
+
+        logger.info("开始执行股票量化分析: %s", stock_code)
+        yield event.plain_result(f"正在分析 {stock_code} 的量化指标，通常需要几秒到几十秒，请稍等。")
+
+        analyzer = _get_ak_stock_analyzer()
+        info, history = await asyncio.gather(
+            analyzer.get_stock_realtime(stock_code),
+            analyzer.get_stock_history(stock_code, days=90),
+        )
+        if not info:
+            yield event.plain_result(f"无法获取股票 {stock_code} 的实时信息。")
+            return
+        if not history:
+            yield event.plain_result(
+                f"{info.name}({info.code}) 的历史行情暂时获取失败，可能是数据源网络异常，请稍后重试。"
+            )
+            return
+        if len(history) < 20:
+            yield event.plain_result(f"{info.name}({info.code}) 历史数据不足，至少需要 20 个交易日数据才能做量化分析。")
+            return
+
+        report = self.ai_analyzer.get_quant_summary(history)
+        header = (
+            f"📈 {info.name}({info.code}) 股票量化分析\n"
+            f"当前价格: {info.latest_price:.2f} ({info.change_rate:+.2f}%)\n"
+            f"分析时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        )
+        yield event.plain_result(f"{header}\n{report}\n\n提示：量化指标基于 A 股历史数据，不代表未来表现。")
+
+    async def _handle_stock_ai_analysis(self, event: AstrMessageEvent, args: list[str]):
+        provider = self.context.get_using_provider()
+        if not provider:
+            yield event.plain_result("当前没有配置大模型提供商，无法执行股票智能分析。")
+            return
+
+        stock_code, error = await self._resolve_stock_target(args[0] if args else None)
+        if error:
+            yield event.plain_result(error)
+            return
+
+        logger.info("开始执行股票智能分析: %s", stock_code)
+        yield event.plain_result(f"正在分析 {stock_code} 的行情、历史走势和资金流，通常需要 10 到 60 秒，请稍等。")
+
+        analyzer = _get_ak_stock_analyzer()
+        info, history, flow_data = await asyncio.gather(
+            analyzer.get_stock_realtime(stock_code),
+            analyzer.get_stock_history(stock_code, days=90),
+            analyzer.get_stock_fund_flow(stock_code, days=10),
+        )
+        if not info:
+            yield event.plain_result(f"无法获取股票 {stock_code} 的实时信息。")
+            return
+        if not history:
+            yield event.plain_result(
+                f"{info.name}({info.code}) 的历史行情暂时获取失败，可能是数据源网络异常，请稍后重试。"
+            )
+            return
+        if len(history) < 20:
+            yield event.plain_result(f"{info.name}({info.code}) 历史数据不足，无法执行股票智能分析。")
+            return
+
+        technical_indicators = self.ai_analyzer.quant.calculate_all_indicators(history)
+        flow_text = self._format_stock_flow_text(flow_data)
+        try:
+            report = await self.ai_analyzer.analyze(
+                fund_info=info,
+                history_data=history,
+                technical_indicators={},
+                user_id=str(getattr(event, "get_sender_id", lambda: "default")() or "default"),
+                fund_flow_text=flow_text,
+            )
+        except Exception as exc:
+            logger.error("股票智能分析失败: %s", exc)
+            if "timed out" in str(exc).lower() or "timeout" in str(exc).lower():
+                yield event.plain_result("股票智能分析失败：大模型请求超时，请稍后重试，或检查当前模型/API 网络状态。")
+            else:
+                yield event.plain_result(f"股票智能分析失败：{exc}")
+            return
+
+        signal, score = self.ai_analyzer.get_technical_signal(history)
+        header = (
+            f"🤖 {info.name}({info.code}) 股票智能分析\n"
+            f"当前价格: {info.latest_price:.2f} ({info.change_rate:+.2f}%)\n"
+            f"技术信号: {signal} ({score})\n"
+            f"分析时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        )
+        yield event.plain_result(f"{header}\n{report}\n\n提示：内容由模型基于 A 股实时/历史数据生成，仅供参考。")
+
+    async def _handle_stock_multi_agent_analysis(self, event: AstrMessageEvent, args: list[str]):
+        provider = self.context.get_using_provider()
+        if not provider:
+            yield event.plain_result("当前没有配置大模型提供商，无法执行股票多智能体分析。")
+            return
+
+        stock_code, error = await self._resolve_stock_target(args[0] if args else None)
+        if error:
+            yield event.plain_result(error)
+            return
+
+        yield event.plain_result(
+            f"正在为 {stock_code} 启动 A 股多智能体博弈分析，通常需要 20 到 60 秒，请稍等。"
+        )
+
+        analyzer = _get_ak_stock_analyzer()
+        info, history, flow_data = await asyncio.gather(
+            analyzer.get_stock_realtime(stock_code),
+            analyzer.get_stock_history(stock_code, days=90),
+            analyzer.get_stock_fund_flow(stock_code, days=10),
+        )
+        if not info:
+            yield event.plain_result(f"无法获取股票 {stock_code} 的实时信息。")
+            return
+        if len(history) < 20:
+            yield event.plain_result(f"{info.name}({info.code}) 历史数据不足，无法执行股票多智能体分析。")
+            return
+
+        try:
+            news_summary = await self.ai_analyzer.get_news_summary(info.name, info.code)
+            factors_text = self.ai_analyzer.factors.format_factors_text(info.name)
+            global_situation_text = self.ai_analyzer.factors.format_global_situation_text(info.name)
+            result = await self.debate_engine.run_debate(
+                fund_info=info,
+                history_data=history,
+                fund_flow_data=flow_data,
+                news_summary=news_summary,
+                factors_text=factors_text,
+                global_situation_text=global_situation_text,
+                quant_analyzer=self.ai_analyzer.quant,
+                eastmoney_api=None,
+            )
+        except Exception as exc:
+            logger.error("股票多智能体分析失败: %s", exc)
+            yield event.plain_result(f"股票多智能体分析失败：{exc}")
+            return
+
+        yield event.plain_result(self.debate_engine.format_debate_summary(result))
 
     async def _send_help(self, event: AstrMessageEvent):
         help_text = (
@@ -739,6 +920,42 @@ class StockModule:
         yield event.plain_result(help_text)
 
 
+    async def _send_help_v2(self, event: AstrMessageEvent):
+        help_text = (
+            "📱 股票功能说明\n\n"
+            "【自选与行情】\n"
+            "• /股票 添加 代码 - 添加自选\n"
+            "• /股票 删除 代码 - 移除自选\n"
+            "• /股票 列表 - 查看自选行情\n"
+            "• /股票 查询 [代码或名称] - 查询实时行情\n"
+            "• /股票 提醒 09:30 [每天|一次] - 定时提醒\n"
+            "• /股票 提醒列表 - 查看定时提醒\n"
+            "• /股票 取消提醒 09:30 - 取消定时提醒\n\n"
+            "【价格提醒】\n"
+            "• /股票 跌到 代码 价格 - 跌到目标价提醒\n"
+            "• /股票 涨到 代码 价格 - 涨到目标价提醒\n"
+            "• /股票 价格提醒列表 - 查看价格提醒\n"
+            "• /股票 取消价格提醒 代码 - 取消价格提醒\n\n"
+            "【基金与分析】\n"
+            "• /股票 搜索股票 关键词 - 搜索 A 股名称（依赖 akshare）\n"
+            "• /股票 量化分析 [代码] - A 股量化指标总结\n"
+            "• /股票 智能分析 [代码] - 基于 A 股数据的 AI 深度分析\n"
+            "• /股票 股票智能分析 [代码] - 基于 A 股数据的多智能体博弈分析\n"
+            "• 基金相关请优先使用 /基金\n"
+            "• /基金 [代码] - 查询基金/ETF/LOF 行情\n"
+            "• /基金 搜索 关键词 - 搜索基金代码\n"
+            "• /基金 设置 代码 - 设置默认基金\n"
+            "• /基金 分析 [代码] - 技术分析\n"
+            "• /基金 历史 [代码] [天数] - 历史行情\n"
+            "• /基金 对比 代码1 代码2 - 两只基金对比\n"
+            "• /基金 量化 [代码] - 量化指标总结\n"
+            "• /基金 智能 [代码] - AI 深度分析\n"
+            "• /基金 博弈 [代码] - 多智能体博弈分析\n"
+            "• 旧用法 /股票 基金... 仍然兼容"
+        )
+        yield event.plain_result(help_text)
+
+
 _stock_module: StockModule | None = None
 
 
@@ -753,5 +970,3 @@ async def handle_stock_command(event: AstrMessageEvent, context: Context, config
     module = init_stock_module(context, config)
     async for r in module.handle_command(event):
         yield r
-
-

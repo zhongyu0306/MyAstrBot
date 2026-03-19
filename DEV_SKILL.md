@@ -11,7 +11,6 @@
   - 定时任务：`astrbot_plugin_sy`
   - 股票：`astrbot_plugin_stock`
   - 天气：`astrbot_plugin_nyweather_char`
-  - Epic 免费游戏：`astrbot_plugin_Epicfell_char`
 - 后续如有新的 char 系列插件，也可以继续往这个合集里加，但必须遵守本 Skill。
 
 ---

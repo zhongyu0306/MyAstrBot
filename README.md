@@ -13,8 +13,10 @@
 |------|--------------|----------|
 | **火车票** | `/火车票`、`/车票`、`/查火车票`；帮助：`/火车票帮助` | `/火车票 厦门 上海` |
 | **简易提醒** | `/提醒`、`/提醒列表`、`/我的提醒` | `/提醒 3分钟后 喝水`、`/提醒 08:30 上班打卡`、`/提醒 列表` |
+| **永久记忆** | `/记忆`、`/认人`、`/我是谁` | `/记忆 我是 张三`、`/记忆 设置 123456789 张三 我同学`、`/我是谁` |
 | **定时任务** | `/rmd`、`/rmdg` | 兼容原 sy 插件子命令，详见帮助 |
-| **股票** | `/股票`、`/stock`、`/自选股`、`/行情` | `/股票 查询 600519`、`/股票 添加 600519`、`/股票 列表`、`/股票 提醒 09:30`、`/股票 跌到 600519 1800`、`/股票 涨到 600519 2000` 等 |
+| **股票** | `/股票`、`/stock`、`/自选股`、`/行情` | 查询：`/股票 查询 600519`、`/股票 查询 贵州茅台`；自选：`/股票 添加 600519`、`/股票 删除 600519`、`/股票 列表`；提醒：`/股票 提醒 09:30`、`/股票 跌到 600519 1800`、`/股票 涨到 600519 2000`；分析：`/股票 智能分析 600519`、`/股票 量化分析 600519` |
+| **基金/量化分析** | 主入口：`/基金`；子命令：`搜索`、`设置`、`分析`、`历史`、`对比`、`量化`、`智能`、`博弈` | `/基金 161226`、`/基金 分析 161226`、`/基金 量化 161226`、`/基金 博弈 161226` |
 | **天气** | `/天气`、`/天气查询`、`/查天气`；帮助：`/天气帮助` | `/天气 北京`、`/天气 北京 5` |
 | **Epic 免费游戏** | `/epic`、`/Epic免费`、`/喜加一`、`/e宝`；帮助：`/Epic帮助` | `/epic` |
 | **点歌** | `/点歌`、`/music`、`/唱歌`、`/唱` | `/点歌 青花`；返回候选后直接回复数字序号即可播放 |
@@ -56,7 +58,7 @@
 - **stock_query**  
   - 功能：查询股票当前行情。  
   - 参数：`query`（必填，string）— 股票代码如 `600519` 或名称关键字如 `贵州茅台`。  
-  - 说明：使用新浪行情源；按名称匹配到多只时返回候选列表，由模型引导用户改用代码查询。
+  - 说明：统一走 `akshare` 路径，优先取东方财富 A 股快照，失败时回退到 `akshare` 暴露的新浪接口；按名称匹配到多只时返回候选列表，由模型引导用户改用代码查询。
 
 - **weather_query**  
   - 功能：查询城市天气。  
@@ -128,7 +130,27 @@
 
 ---
 
-## 五、在 Agent / Skill 中使用建议
+## 五、股票模块说明
+
+- **支持的入口**：`/股票`、`/stock`、`/自选股`、`/行情` 都会进入同一套股票能力。
+- **支持的查询参数**：既可以用 6 位股票代码，如 `600519`、`000001`，也可以直接用股票名称关键字，如 `贵州茅台`、`平安银行`。
+- **查询命令**：`/股票 查询 代码或名称`
+  例如：`/股票 查询 600519`、`/股票 查询 贵州茅台`
+- **自选股管理**：`/股票 添加 代码`、`/股票 删除 代码`、`/股票 列表`
+  例如：`/股票 添加 600519`、`/股票 删除 000001`、`/股票 列表`
+- **定时提醒**：`/股票 提醒 HH:MM`
+  例如：`/股票 提醒 09:30`
+  说明：用于在固定时间推送自选股行情，通常配合“添加”后的自选股一起使用。
+- **价格提醒**：`/股票 跌到 代码 价格`、`/股票 涨到 代码 价格`
+  例如：`/股票 跌到 600519 1800`、`/股票 涨到 600519 2000`
+- **分析能力**：`/股票 量化分析 代码`、`/股票 智能分析 代码`
+  例如：`/股票 量化分析 600519`、`/股票 智能分析 000001`
+- **返回结果说明**：查询会优先返回实时行情；名称匹配到多只股票时，会返回候选列表，建议改用股票代码再次查询以获得更稳定的结果。
+- **数据源说明**：默认优先走东方财富 A 股快照，若主源暂时不可用，会自动切换到新浪备用源继续取数。
+
+---
+
+## 六、在 Agent / Skill 中使用建议
 
 - **工具发现**：将上述工具的 `name`、`description`、`parameters` 暴露给 Agent，由大模型根据自然语言自动选工具。
 - **提示词建议**（可写入系统提示词）：
@@ -147,13 +169,14 @@
 
 ---
 
-## 六、插件整合与结构说明
+## 七、插件整合与结构说明
 
-### 整合来源
+### 整合来源与参考代码
 
 - 火车票：原 `astrbot_plugin_train`
 - 智能定时任务：原 `astrbot_plugin_sy`
 - 股票与自选股：原 `astrbot_plugin_stock`
+- 基金/量化分析：原 `astrbot_plugin_fund_analyzer-master`
 - 天气：原 `astrbot_plugin_nyweather_char`
 - Epic 免费游戏：原 `astrbot_plugin_Epicfell_char`
 - 记账：原 `astrbot_plugin_bookkeeping`
@@ -166,10 +189,27 @@
 
 本插件**不**对「非 `/` 开头」的普通消息做意图识别；所有功能通过**命令**或 **Agent 内 LLM 工具**调用，便于与 MCP 等指令/工具体系集成。
 
+### 基金/股票分析代码来源说明
+
+- `fund_analysis_utils.py`：基金命令路由、兼容 `/股票 基金...` 子命令的整合层，基于 `astrbot_plugin_fund_analyzer-master/main.py` 的相关基金分析逻辑改造后接入当前插件。
+- `fund_analyzer/`：量化指标、AI 分析、新闻与因子整理等底层能力，主要来自 `astrbot_plugin_fund_analyzer-master/ai_analyzer/` 与其周边实现。
+- `fund_stock/`：A 股搜索/行情、六维分析、多空博弈提示词与结果汇总，主体来源于 `astrbot_plugin_fund_analyzer-master/stock/`，其中多智能体博弈架构参考了原仓库 README 中提到的 [FinGenius](https://github.com/HuaYaoAI/FinGenius) 思路。
+- `eastmoney_api.py`：基金/ETF/LOF 实时行情、历史走势、资金流等接口封装，来自 `astrbot_plugin_fund_analyzer-master` 的东方财富数据访问逻辑，并按当前仓库结构做了整理。
+- `fund_templates/`、`image_generator.py`：基金分析图片报告模板与渲染逻辑，来自 `astrbot_plugin_fund_analyzer-master/templates/` 及其配套生成代码。
+- `stock_utils.py`：当前仓库自有的股票自选、提醒、查询入口；现已统一改为通过 `fund_stock/analyzer.py` 的 `akshare` 路径获取 A 股行情与名称搜索结果。
+
 ### 目录与代码结构
 
 - `main.py`：插件元信息、指令路由注册、LLM 工具注册，业务逻辑下沉到 utils。
-- `train_utils.py`、`sy_scheduler_utils.py`、`stock_utils.py`、`weather_utils.py`、`epic_utils.py`、`bookkeeping_utils.py`、`jrys_utils.py`、`ocr_utils.py`、`qianfan_search_utils.py`、`music_utils.py`、`anime_utils.py`、`email_utils.py`：各功能实现。
+- `train_utils.py`、`sy_scheduler_utils.py`、`stock_utils.py`、`fund_analysis_utils.py`、`weather_utils.py`、`epic_utils.py`、`bookkeeping_utils.py`、`jrys_utils.py`、`ocr_utils.py`、`qianfan_search_utils.py`、`music_utils.py`、`anime_utils.py`、`email_utils.py`、`memory_utils.py`：各功能实现。
+- `fund_analyzer/`、`fund_stock/`、`eastmoney_api.py`：基金/量化分析与多智能体博弈分析的底层模块。
+- `memory_utils.py`：基于 QQ 号的永久记忆层，支持手工绑定“谁是谁”，并在普通聊天进入 LLM 前自动注入当前用户记忆。
+- 基金相关能力现已支持直接通过 `/基金` 调用，原 `/股票` 下的基金子命令保留兼容。
+- 股票行情与股票名称搜索已切到 `akshare` 路径；`/股票 搜索股票`、`/股票 查询`、自选股列表与提醒均通过这一链路取数，依赖 `akshare` 与 `pandas`。
+- `/基金 智能`、`/基金 博弈` 以及兼容的 `/股票 智能分析`、`/股票 股票智能分析` 依赖已配置的大模型提供商。
+- `/股票 量化分析`、`/股票 智能分析`、`/股票 股票智能分析` 现已切到真正的 A 股数据链路，使用 `akshare` 提供的 A 股实时行情、历史 K 线和个股资金流。
+- `/基金 博弈` 与 `/股票 股票智能分析` 当前都已收敛为 3 次 AI 对话：六维联合分析 1 次、多空综合辩论 1 次、裁判裁定 1 次。
+- 普通聊天进入默认大模型前，会通过 `on_llm_request` 钩子自动读取当前 QQ 的永久记忆，让 bot 先知道“当前这个人是谁”再回复。
 - 新增功能请优先新增独立 `xxx_utils.py`，并在本 README「已注册的 LLM 工具一览」中补充说明；同时提供命令入口与至少一个 LLM 工具（FunctionTool）封装。
 
 ### 配置统一（_conf_schema.json）
@@ -192,3 +232,5 @@
 - 运势：https://github.com/NINIYOYYO/astrbot_plugin_jrys  
 - 点歌：https://github.com/Zhalslar/astrbot_plugin_music  
 - 生图：https://github.com/muyouzhi6/astrbot_plugin_gitee_aiimg  
+- 基金/股票分析整合来源：工作区内 `astrbot_plugin_fund_analyzer-master/` 目录及其自带 README/源码  
+- 多智能体博弈灵感来源：https://github.com/HuaYaoAI/FinGenius  
