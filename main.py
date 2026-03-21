@@ -427,14 +427,35 @@ class AllCharPlugin(Star):
         在普通聊天进入大模型前注入当前 QQ 的永久记忆。
         """
         store = init_user_memory_store()
-        store.observe_user(event)
+        qq_id = store.observe_user(event)
         memory_prompt = store.build_prompt_for_event(event)
-        if not memory_prompt:
+        message_text = ""
+        try:
+            message_text = str(event.get_message_str() or "").strip()
+        except Exception:
+            message_text = ""
+        related_prompt = store.build_related_memories_prompt(
+            message_text,
+            exclude_qq_ids={qq_id} if qq_id else None,
+        )
+
+        prompt_parts = [part for part in (memory_prompt, related_prompt) if part]
+        if not prompt_parts:
+            logger.info(
+                "[astrbot_all_char] on_llm_request 未生成用户记忆提示词: sender_id=%s",
+                qq_id or "unknown",
+            )
             return
 
         base_prompt = getattr(req, "system_prompt", "") or ""
+        extra_prompt = "\n\n".join(prompt_parts)
         joiner = "\n\n" if base_prompt else ""
-        req.system_prompt = f"{base_prompt}{joiner}{memory_prompt}"
+        req.system_prompt = f"{base_prompt}{joiner}{extra_prompt}"
+        logger.info(
+            "[astrbot_all_char] on_llm_request 注入后的 system_prompt: sender_id=%s\n%s",
+            qq_id or "unknown",
+            req.system_prompt,
+        )
 
     # ---------------- LLM Tools（供 AI 自动调用） ----------------
 
