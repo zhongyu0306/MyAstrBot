@@ -26,6 +26,9 @@ if TYPE_CHECKING:
 class AIFundAnalyzer:
     """AI 智能基金分析器（含量化分析）"""
 
+    ANALYSIS_TARGET_CHARS = 1400
+    ANALYSIS_MAX_CHARS = 1800
+
     def __init__(self, context: "Context"):
         """
         初始化 AI 分析器
@@ -37,6 +40,68 @@ class AIFundAnalyzer:
         self.factors = FundInfluenceFactors()
         self.prompt_builder = AnalysisPromptBuilder()
         self.quant = QuantAnalyzer()  # 量化分析器
+
+    @classmethod
+    def _normalize_text_blocks(cls, text: str) -> str:
+        normalized = str(text or "").replace("\r\n", "\n").strip()
+        normalized = re.sub(r"\n[ \t]+\n", "\n\n", normalized)
+        normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+        return normalized
+
+    @classmethod
+    def _limit_analysis_output(
+        cls,
+        text: str,
+        *,
+        target_chars: int | None = None,
+        max_chars: int | None = None,
+    ) -> str:
+        normalized = cls._normalize_text_blocks(text)
+        if not normalized:
+            return ""
+
+        target = max(int(target_chars or cls.ANALYSIS_TARGET_CHARS), 200)
+        maximum = max(int(max_chars or cls.ANALYSIS_MAX_CHARS), target)
+        if len(normalized) <= maximum:
+            return normalized
+
+        suffix = "\n\n（内容已按系统字数上限压缩，如需展开某一部分，请继续追问对应主题。）"
+        budget = max(maximum - len(suffix), 120)
+        preferred_budget = min(target, budget)
+
+        blocks = [block.strip() for block in re.split(r"\n\s*\n", normalized) if block.strip()]
+        if not blocks:
+            return normalized[:budget].rstrip() + suffix
+
+        selected: list[str] = []
+        current_length = 0
+        stop = False
+        for block in blocks:
+            addition = len(block) if not selected else len(block) + 2
+            if current_length + addition > budget:
+                if current_length >= preferred_budget:
+                    stop = True
+                    break
+                remaining = budget - current_length - (0 if not selected else 2)
+                if remaining > 40:
+                    trimmed = block[:remaining].rstrip("，,；;：:、 \n")
+                    if trimmed:
+                        selected.append(trimmed)
+                stop = True
+                break
+            selected.append(block)
+            current_length += addition
+            if current_length >= preferred_budget:
+                stop = True
+                break
+
+        if not selected:
+            return normalized[:budget].rstrip() + suffix
+
+        limited = "\n\n".join(selected).strip()
+        if stop and len(limited) < len(normalized):
+            return limited + suffix
+        return limited
 
     def _get_provider(self) -> "Provider | None":
         """获取 LLM 提供商"""
@@ -564,7 +629,17 @@ class AIFundAnalyzer:
             len(output),
         )
 
-        return output
+        limited_output = self._limit_analysis_output(output)
+        if len(limited_output) != len(output):
+            logger.info(
+                "主分析模型输出已压缩: %s(%s), raw_length=%s, limited_length=%s",
+                fund_info.name,
+                fund_info.code,
+                len(output),
+                len(limited_output),
+            )
+
+        return limited_output
 
     def _build_quant_analysis_prompt(
         self,
