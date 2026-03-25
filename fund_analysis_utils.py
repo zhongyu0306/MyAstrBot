@@ -15,6 +15,7 @@ from .config_utils import ensure_flat_config
 from .eastmoney_api import get_api as get_eastmoney_api
 from .fund_analyzer import AIFundAnalyzer, QuantAnalyzer
 from .fund_stock import DebateEngine, StockAnalyzer
+from .passive_memory_utils import record_passive_habit
 
 
 @dataclass
@@ -404,6 +405,7 @@ class FundAnalysisModule:
                 "你可以先试试：/基金 搜索 关键词"
             )
             return
+        record_passive_habit(event, "fund", "fund_code", info.code, source_text=event.message_str.strip())
         yield event.plain_result(self._format_fund_info(info))
 
     async def _handle_search_fund(self, event: AstrMessageEvent, args: list[str]):
@@ -442,6 +444,7 @@ class FundAnalysisModule:
             return
         self.user_fund_settings[self._safe_sender_id(event)] = fund_code
         self._save_user_settings()
+        record_passive_habit(event, "fund", "default_fund_code", info.code, source_text=event.message_str.strip())
         yield event.plain_result(f"已设置默认基金为 {info.name}({info.code})。")
 
     async def _handle_fund_analysis(self, event: AstrMessageEvent, args: list[str]):
@@ -454,6 +457,7 @@ class FundAnalysisModule:
             yield event.plain_result(f"无法获取 {fund_code} 的基金信息。")
             return
         indicators = self.market.calculate_technical_indicators(history)
+        record_passive_habit(event, "fund", "fund_code", info.code, source_text=event.message_str.strip())
         yield event.plain_result(self._format_fund_analysis(info, indicators))
 
     async def _handle_fund_history(self, event: AstrMessageEvent, args: list[str]):
@@ -491,6 +495,7 @@ class FundAnalysisModule:
             )
         if len(history) > 8:
             lines.append(f"以上展示最近 8 条，共 {len(history)} 条。")
+        record_passive_habit(event, "fund", "fund_code", fund_code, source_text=event.message_str.strip())
         yield event.plain_result("\n".join(lines))
 
     async def _handle_fund_compare(self, event: AstrMessageEvent, args: list[str]):
@@ -556,6 +561,8 @@ class FundAnalysisModule:
             lines.append(f"\n阶段性结论：{info2.name} 略占优势。")
         else:
             lines.append("\n阶段性结论：两者暂时接近，建议结合持仓目标再判断。")
+        record_passive_habit(event, "fund", "fund_code", code1, source_text=event.message_str.strip())
+        record_passive_habit(event, "fund", "fund_code", code2, source_text=event.message_str.strip())
         yield event.plain_result("\n".join(lines))
 
     async def _handle_quant_analysis(self, event: AstrMessageEvent, args: list[str]):
@@ -576,6 +583,7 @@ class FundAnalysisModule:
             f"当前价格: {info.latest_price:.4f} ({info.change_rate:+.2f}%)\n"
             f"分析时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
         )
+        record_passive_habit(event, "fund", "fund_code", info.code, source_text=event.message_str.strip())
         yield event.plain_result(f"{header}\n{report}\n\n提示：量化指标基于历史数据，不代表未来表现。")
 
     async def _handle_ai_analysis(self, event: AstrMessageEvent, args: list[str]):
@@ -640,6 +648,7 @@ class FundAnalysisModule:
             f"技术信号: {signal} ({score})\n"
             f"分析时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
         )
+        record_passive_habit(event, "fund", "fund_code", info.code, source_text=event.message_str.strip())
         yield event.plain_result(f"{header}\n{report}\n\n提示：内容由模型生成，仅供参考。")
 
     async def _handle_multi_agent_analysis(self, event: AstrMessageEvent, args: list[str]):
@@ -684,6 +693,7 @@ class FundAnalysisModule:
             logger.error("多智能体分析失败: %s", exc)
             yield event.plain_result(f"多智能体分析失败：{exc}")
             return
+        record_passive_habit(event, "fund", "fund_code", info.code, source_text=event.message_str.strip())
         yield event.plain_result(self.debate_engine.format_debate_summary(result))
 
     async def _handle_help(self, event: AstrMessageEvent):

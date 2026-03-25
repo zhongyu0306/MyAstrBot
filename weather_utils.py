@@ -9,6 +9,8 @@ import aiohttp
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent
 
+from .passive_memory_utils import record_passive_habit
+
 
 async def _query_weather_text(api_url: str, api_key: str, city: str, days: int | None) -> str | None:
     try:
@@ -164,11 +166,13 @@ async def handle_weather_command(event: AstrMessageEvent, config: AstrBotConfig)
         if str(default_format).lower() == "image":
             image_path = await _query_weather_image(api_url, api_key, city, days)
             if image_path:
+                record_passive_habit(event, "weather", "city", city, source_text=message_text or "")
                 yield event.image_result(image_path)
             else:
                 text = await _query_weather_text(api_url, api_key, city, days)
                 if text:
                     title = f"📍 {city}天气" if not days or days == 1 else f"📍 {city} {days}天天气预报"
+                    record_passive_habit(event, "weather", "city", city, source_text=message_text or "")
                     yield event.plain_result(f"{title}\n\n{text}")
                 else:
                     yield event.plain_result(
@@ -179,6 +183,7 @@ async def handle_weather_command(event: AstrMessageEvent, config: AstrBotConfig)
             text = await _query_weather_text(api_url, api_key, city, days)
             if text:
                 title = f"📍 {city}天气" if not days or days == 1 else f"📍 {city} {days}天天气预报"
+                record_passive_habit(event, "weather", "city", city, source_text=message_text or "")
                 yield event.plain_result(f"{title}\n\n{text}")
             else:
                 yield event.plain_result(
@@ -207,4 +212,3 @@ async def handle_weather_help(event: AstrMessageEvent):
         "- 配置项 `weather_default_format` 可选择 text/image 两种返回形式。"
     )
     yield event.plain_result(text)
-

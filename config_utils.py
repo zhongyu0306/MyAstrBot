@@ -8,6 +8,7 @@ _MODULE_KEYS = (
     "stock",
     "fund",
     "weather",
+    "memory",
     "epic",
     "jrys",
     "ocr",

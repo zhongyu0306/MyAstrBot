@@ -26,7 +26,6 @@ from .stock_utils import (
 )
 from .fund_analysis_utils import handle_fund_command
 from .weather_utils import _get_weather_config, _query_weather_text, handle_weather_command, handle_weather_help
-from .epic_utils import handle_epic_command, handle_epic_help
 from .bookkeeping_utils import (
     init_bookkeeping_module,
     handle_bookkeeping_expense,
@@ -79,10 +78,13 @@ from .email_subscription_utils import (
     handle_list_subscriptions_command,
 )
 from .memory_utils import (
+    configure_memory_admin_qq_ids,
     handle_memory_command,
     handle_who_am_i_command,
     init_user_memory_store,
 )
+from .passive_memory_utils import init_passive_memory_store
+from .memory_panel_utils import handle_memory_panel_command, maybe_autostart_memory_panel
 
 
 def _get_effective_config(ctx: Context, plugin_config: AstrBotConfig | None) -> AstrBotConfig | dict:
@@ -140,6 +142,9 @@ class AllCharPlugin(Star):
         init_email_subscription_center(self.context, self.config)
         # 初始化用户永久记忆存储
         init_user_memory_store()
+        configure_memory_admin_qq_ids(getattr(self.config, "memory_admin_qq_ids", None))
+        init_passive_memory_store()
+        maybe_autostart_memory_panel(self.context, self.config)
 
         # 注册一批可供 Agent 自动调用的工具（类似 astrbot_plugin_payqr）
         try:
@@ -228,6 +233,11 @@ class AllCharPlugin(Star):
     @filter.command("我是谁")
     async def cmd_who_am_i(self, event: AstrMessageEvent):
         async for result in handle_who_am_i_command(event):
+            yield result
+
+    @filter.command("记忆面板", alias={"memory_panel", "记忆管理"})
+    async def cmd_memory_panel(self, event: AstrMessageEvent):
+        async for result in handle_memory_panel_command(event, self.context, self.config):
             yield result
 
     # ---------------- 股票 ----------------
@@ -427,19 +437,45 @@ class AllCharPlugin(Star):
         在普通聊天进入大模型前注入当前 QQ 的永久记忆。
         """
         store = init_user_memory_store()
+        passive_store = init_passive_memory_store()
         qq_id = store.observe_user(event)
-        memory_prompt = store.build_prompt_for_event(event)
         message_text = ""
         try:
             message_text = str(event.get_message_str() or "").strip()
         except Exception:
             message_text = ""
+        passive_store.observe_message(event)
+        memory_prompt = store.build_prompt_for_event(event)
+        passive_profile_prompt = passive_store.build_profile_prompt(event)
+        event_recall_prompt = (
+            passive_store.build_event_recall_prompt(
+                event,
+                message_text=message_text,
+            )
+            if getattr(self.config, "memory_event_recall_enabled", True)
+            else ""
+        )
         related_prompt = store.build_related_memories_prompt(
             message_text,
             exclude_qq_ids={qq_id} if qq_id else None,
         )
+        reminiscence_prompt = passive_store.build_reminiscence_bridge_prompt(
+            self.context,
+            event,
+            message_text=message_text,
+        )
 
-        prompt_parts = [part for part in (memory_prompt, related_prompt) if part]
+        prompt_parts = [
+            part
+            for part in (
+                memory_prompt,
+                passive_profile_prompt,
+                event_recall_prompt,
+                related_prompt,
+                reminiscence_prompt,
+            )
+            if part
+        ]
         if not prompt_parts:
             logger.info(
                 "[astrbot_all_char] on_llm_request 未生成用户记忆提示词: sender_id=%s",

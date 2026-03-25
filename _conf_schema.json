@@ -262,6 +262,56 @@
       }
     }
   },
+  "memory": {
+    "description": "记忆增强与记忆面板",
+    "hint": "控制被动记忆、事件回忆和本地记忆管理面板。",
+    "type": "object",
+    "items": {
+      "memory_panel_enabled": {
+        "description": "启用记忆面板",
+        "type": "bool",
+        "hint": "关闭后 `/记忆面板` 命令不会启动本地管理面板。",
+        "default": true
+      },
+      "memory_admin_qq_ids": {
+        "description": "记忆管理员 QQ 列表",
+        "type": "list",
+        "hint": "支持配置多个 QQ，只有这些管理员可以使用 `/记忆`、`/认人`、`/我是谁`、`/记忆面板`；留空表示暂未配置管理员。",
+        "default": []
+      },
+      "memory_panel_auto_start": {
+        "description": "插件启动时自动开启记忆面板",
+        "type": "bool",
+        "hint": "建议默认关闭，需要时再通过 `/记忆面板` 手动打开。",
+        "default": false
+      },
+      "memory_panel_host": {
+        "description": "记忆面板监听地址",
+        "type": "string",
+        "hint": "默认使用 0.0.0.0 允许外网访问；如果只想本机访问可改成 127.0.0.1。",
+        "default": "0.0.0.0"
+      },
+      "memory_panel_port": {
+        "description": "记忆面板端口",
+        "type": "int",
+        "hint": "默认使用 7835，如端口冲突可修改。",
+        "slider": { "min": 1024, "max": 65535, "step": 1 },
+        "default": 7835
+      },
+      "memory_panel_public_base_url": {
+        "description": "记忆面板公网访问地址",
+        "type": "string",
+        "hint": "可填写 http://你的IP:7835 或 https://你的域名；填写后 bot 返回的面板链接会优先使用这个地址。",
+        "default": ""
+      },
+      "memory_event_recall_enabled": {
+        "description": "启用事件回忆注入",
+        "type": "bool",
+        "hint": "开启后会按当前消息与被动事件记忆的相关性，自动注入事件回忆提示。",
+        "default": true
+      }
+    }
+  },
   "jrys": {
     "description": "今日运势",
     "hint": "关键词触发、节假日爆率、固定当日运势与缓存。",

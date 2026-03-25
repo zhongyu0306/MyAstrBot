@@ -14,6 +14,8 @@ from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.message_components import At
 from astrbot.api.star import Context, StarTools
 
+from .passive_memory_utils import record_passive_habit
+
 
 _REMINDER_FILE_NAME = "simple_reminders.json"
 _REMINDER_HISTORY_FILE_NAME = "simple_reminders_history.json"
@@ -613,6 +615,13 @@ async def handle_simple_reminder(event: AstrMessageEvent, context: Context, conf
     await center.add_reminder(session_id, creator_id, creator_name, text, target)
 
     target_str = target.strftime("%Y-%m-%d %H:%M:%S")
+    record_passive_habit(
+        event,
+        "reminder",
+        "reminder_time",
+        target.strftime("%H:%M"),
+        source_text=raw,
+    )
     yield event.plain_result(
         f"好嘞，已经帮你记下了。\n"
         f"将在 {target_str} 提醒你：{text}\n"

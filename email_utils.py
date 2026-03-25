@@ -17,6 +17,8 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.star import Context, StarTools
 
+from .passive_memory_utils import record_passive_habit
+
 # 匹配常见邮箱地址（含 qq.com、163.com 等）
 EMAIL_PATTERN = re.compile(r"[^\s@]+@[^\s@]+\.[^\s@]+")
 _EMAIL_RECENT_SEND_CACHE: dict[str, float] = {}
@@ -546,6 +548,14 @@ async def _generate_and_send_email(
         smtp_host=_get_email_config(config, "email_smtp_host", "smtp.qq.com"),
         smtp_port=int(_get_email_config(config, "email_smtp_port", "465") or "465"),
     )
+    if ok:
+        record_passive_habit(
+            event,
+            "email",
+            "recipient",
+            to_addr.lower(),
+            source_text=user_prompt,
+        )
     yield event.plain_result(msg)
 
 

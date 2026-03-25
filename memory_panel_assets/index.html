@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>记忆面板</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <p class="eyebrow">AstrBot</p>
+        <h1>记忆面板</h1>
+        <p class="subtle">查看、修改认人记忆、偏好、关系、习惯与事件回忆</p>
+      </div>
+
+      <div class="search-card">
+        <label for="user-search">搜索用户</label>
+        <input id="user-search" type="search" placeholder="QQ / 别名 / 平台昵称 / 备注">
+      </div>
+
+      <div id="stats-grid" class="stats-grid"></div>
+
+      <div class="user-list-card">
+        <div class="section-title">
+          <span>用户列表</span>
+          <button id="refresh-users" class="ghost-btn">刷新</button>
+        </div>
+        <div id="user-list" class="user-list"></div>
+      </div>
+    </aside>
+
+    <main class="content">
+      <section id="empty-state" class="empty-state">
+        <div>
+          <p class="eyebrow">记忆中心</p>
+          <h2>先从左侧选一个用户</h2>
+          <p>选中后可以直接编辑人物档案、偏好、关系边、跨模块习惯，以及被动记录下来的事件回忆。</p>
+        </div>
+      </section>
+
+      <section id="detail-view" class="detail-view hidden">
+        <div class="hero-card">
+          <div>
+            <p class="eyebrow">人物档案</p>
+            <h2 id="hero-title">-</h2>
+            <p id="hero-subtitle" class="subtle">-</p>
+          </div>
+          <div class="hero-meta">
+            <span id="hero-last-seen" class="pill">最近出现: -</span>
+            <span id="hero-updated" class="pill">最近更新: -</span>
+          </div>
+        </div>
+
+        <section class="panel">
+          <div class="section-title"><span>基础资料</span></div>
+          <form id="profile-form" class="form-grid">
+            <label>当前平台昵称<input name="platform_name" type="text" placeholder="当前在平台上显示的昵称"></label>
+            <label class="wide">备注<textarea name="note" rows="3" placeholder="例如：初中同学 / 常聊基金 / 工作搭子"></textarea></label>
+            <div class="form-actions wide">
+              <button type="submit" class="primary-btn">保存资料</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="panel">
+          <div class="section-title"><span>认人记忆</span></div>
+          <p class="subtle">全局别名适用于所有场景；场景别名可指定某个群或私聊里的专属称呼。</p>
+          <div class="section-title"><span>全局别名</span></div>
+          <div id="alias-list" class="chip-row"></div>
+          <div class="section-title"><span>场景别名</span></div>
+          <div id="scoped-alias-list" class="editable-list"></div>
+          <form id="alias-form" class="form-grid compact-grid">
+            <label>称呼<input name="alias" type="text" placeholder="例如：阿周 / 宝宝 / 老张"></label>
+            <label>生效范围
+              <select id="alias-scene-type" name="scene_type"></select>
+            </label>
+            <label id="alias-scene-value-wrap">群号<input id="alias-scene-value" name="scene_value" type="text" placeholder="仅群聊场景需要填写"></label>
+            <div class="form-actions wide">
+              <button type="submit" class="primary-btn">新增认人称呼</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="panel">
+          <div class="section-title"><span>偏好记忆</span></div>
+          <div id="preferences-list" class="editable-list"></div>
+          <form id="preference-form" class="form-grid compact-grid">
+            <label>类型
+              <select name="preference_type" id="preference-type-select"></select>
+            </label>
+            <label>内容<input name="value" type="text" placeholder="例如：抹茶 / 小周"></label>
+            <label>置信度<input name="confidence" type="number" step="0.01" min="0" max="1" value="0.82"></label>
+            <label class="wide">来源说明<input name="source_text" type="text" value="记忆面板手动录入" placeholder="例如：管理员手动补录"></label>
+            <div class="form-actions wide">
+              <button type="submit" class="primary-btn">新增偏好</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="split-grid">
+          <section class="panel">
+            <div class="section-title"><span>节点关系图谱</span></div>
+            <div id="graph-canvas" class="graph-canvas"></div>
+          </section>
+
+          <section class="panel">
+            <div class="section-title"><span>关系边</span></div>
+            <div id="relations-list" class="editable-list"></div>
+            <form id="relation-form" class="form-grid compact-grid">
+              <label>关系对象
+                <select id="relation-target-qq-id" name="target_qq_id"></select>
+              </label>
+              <label>关系
+                <select id="relation-type-select" name="relation_type"></select>
+              </label>
+              <label>置信度<input name="confidence" type="number" step="0.01" min="0" max="1" value="0.84"></label>
+              <label class="wide">备注<input name="note" type="text" placeholder="可选备注"></label>
+              <label class="wide">来源说明<input name="source_text" type="text" value="记忆面板手动录入" placeholder="例如：管理员手动补录"></label>
+              <div class="form-actions wide">
+                <button type="submit" class="primary-btn">新增关系</button>
+              </div>
+            </form>
+          </section>
+        </section>
+
+        <section class="panel">
+          <div class="section-title"><span>跨模块习惯记忆</span></div>
+          <div id="habits-list" class="editable-list"></div>
+          <form id="habit-form" class="form-grid compact-grid">
+            <label>模块
+              <select id="habit-module-select" name="module_name"></select>
+            </label>
+            <label>习惯类型
+              <select id="habit-key-select" name="habit_key"></select>
+            </label>
+            <label>内容值<input name="habit_value" type="text" placeholder="例如：上海 / 600519 / 08:30"></label>
+            <label class="wide">来源说明<input name="source_text" type="text" value="记忆面板手动录入" placeholder="例如：管理员手动补录"></label>
+            <div class="form-actions wide">
+              <button type="submit" class="primary-btn">新增习惯</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="panel">
+          <div class="section-title"><span>事件回忆</span></div>
+          <div id="events-list" class="timeline-list"></div>
+          <form id="event-form" class="form-grid compact-grid">
+            <label>时间标签<input name="event_date_label" type="text" placeholder="例如：昨天 / 上周 / 春节前"></label>
+            <label class="wide">事件摘要<input name="summary" type="text" placeholder="例如：昨天和小王去看了电影"></label>
+            <label>置信度<input name="confidence" type="number" step="0.01" min="0" max="1" value="0.82"></label>
+            <label class="wide">来源说明<input name="source_text" type="text" value="记忆面板手动录入" placeholder="例如：管理员手动补录"></label>
+            <div class="form-actions wide">
+              <button type="submit" class="primary-btn">新增事件</button>
+            </div>
+          </form>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <template id="empty-list-template">
+    <div class="empty-list">还没有记录</div>
+  </template>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

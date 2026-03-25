@@ -13,6 +13,7 @@ from .config_utils import ensure_flat_config
 from .fund_analyzer import AIFundAnalyzer
 from .fund_analysis_utils import can_handle_stock_extension, handle_stock_extension_command
 from .fund_stock import DebateEngine, StockAnalyzer as AkStockAnalyzer
+from .passive_memory_utils import record_passive_habit
 
 
 def _data_dir():
@@ -527,6 +528,7 @@ class StockModule:
             data = _load_watchlist()
             data[session_id] = rec
             _save_watchlist(data)
+            record_passive_habit(event, "stock", "stock_code", code, source_text=msg)
             yield event.plain_result(f"✅ 已添加自选：{code}")
 
         elif cmd in ("删除", "移除", "remove", "del"):
@@ -585,6 +587,8 @@ class StockModule:
                 yield event.plain_result("请指定代码或先添加自选，如：/股票 查询 600519 或 /股票 查询 贵州茅台")
                 return
             quotes = await _fetch_quotes(codes)
+            for code in codes[:5]:
+                record_passive_habit(event, "stock", "stock_code", code, source_text=msg)
             yield event.plain_result(_format_quotes(quotes, "行情"))
 
         elif cmd in ("提醒", "定时", "remind"):
@@ -621,6 +625,7 @@ class StockModule:
                 creator_id,
                 creator_name,
             )
+            record_passive_habit(event, "stock", "reminder_time", time_str, source_text=msg)
             yield event.plain_result(f"✅ 已设置 {time_str} 定时提醒（{'每天' if repeat == 'daily' else '仅一次'}）")
 
         elif cmd in ("提醒列表", "remindlist"):
@@ -693,6 +698,7 @@ class StockModule:
                 creator_id,
                 creator_name,
             )
+            record_passive_habit(event, "stock", "stock_code", code, source_text=msg)
             yield event.plain_result(f"✅ 已设置：{code} 跌到 {price} 元时提醒。")
 
         elif cmd in ("涨到", "提醒涨", "涨价提醒"):
@@ -737,6 +743,7 @@ class StockModule:
                 creator_id,
                 creator_name,
             )
+            record_passive_habit(event, "stock", "stock_code", code, source_text=msg)
             yield event.plain_result(f"✅ 已设置：{code} 涨到 {price} 元时提醒。")
 
         elif cmd in ("价格提醒列表", "跌价列表", "涨价列表"):
@@ -807,6 +814,7 @@ class StockModule:
             f"当前价格: {info.latest_price:.2f} ({info.change_rate:+.2f}%)\n"
             f"分析时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
         )
+        record_passive_habit(event, "stock", "stock_code", info.code, source_text=event.get_message_str().strip())
         yield event.plain_result(f"{header}\n{report}\n\n提示：量化指标基于 A 股历史数据，不代表未来表现。")
 
     async def _handle_stock_ai_analysis(self, event: AstrMessageEvent, args: list[str]):
@@ -936,6 +944,7 @@ class StockModule:
             f"技术信号: {signal} ({score})\n"
             f"分析时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
         )
+        record_passive_habit(event, "stock", "stock_code", info.code, source_text=event.get_message_str().strip())
         yield event.plain_result(f"{header}\n{report}\n\n提示：内容由模型基于 A 股实时/历史数据生成，仅供参考。")
 
     async def _handle_stock_multi_agent_analysis(self, event: AstrMessageEvent, args: list[str]):
@@ -985,6 +994,7 @@ class StockModule:
             yield event.plain_result(f"股票多智能体分析失败：{exc}")
             return
 
+        record_passive_habit(event, "stock", "stock_code", info.code, source_text=event.get_message_str().strip())
         yield event.plain_result(self.debate_engine.format_debate_summary(result))
 
     async def _send_help(self, event: AstrMessageEvent):

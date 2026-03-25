@@ -13,7 +13,40 @@ from astrbot.api.event import AstrMessageEvent
 from astrbot.api.star import StarTools
 
 
-ADMIN_QQ_ID = "1102025067"
+DEFAULT_ADMIN_QQ_IDS: tuple[str, ...] = ()
+_configured_admin_qq_ids: tuple[str, ...] = DEFAULT_ADMIN_QQ_IDS
+
+
+def _normalize_admin_qq_ids(raw_value: Any) -> tuple[str, ...]:
+    candidates: list[str] = []
+    if isinstance(raw_value, (list, tuple, set)):
+        iterable = list(raw_value)
+    else:
+        iterable = re.split(r"[,，\s]+", str(raw_value or "").strip()) if str(raw_value or "").strip() else []
+
+    seen: set[str] = set()
+    for item in iterable:
+        qq_id = str(item or "").strip()
+        if not qq_id or not qq_id.isdigit() or qq_id in seen:
+            continue
+        candidates.append(qq_id)
+        seen.add(qq_id)
+    return tuple(candidates) if candidates else DEFAULT_ADMIN_QQ_IDS
+
+
+def configure_memory_admin_qq_ids(raw_value: Any) -> tuple[str, ...]:
+    global _configured_admin_qq_ids
+    _configured_admin_qq_ids = _normalize_admin_qq_ids(raw_value)
+    return _configured_admin_qq_ids
+
+
+def get_memory_admin_qq_ids() -> tuple[str, ...]:
+    return _configured_admin_qq_ids
+
+
+def get_memory_admin_display_text() -> str:
+    admin_ids = get_memory_admin_qq_ids()
+    return "、".join(admin_ids) if admin_ids else "未配置"
 
 
 class UserMemoryStore:
@@ -23,6 +56,9 @@ class UserMemoryStore:
     LEGACY_JSON_NAME = "user_memory.json"
     ALIAS_TYPE_MEMORY = "memory"
     ALIAS_TYPE_PLATFORM = "platform"
+    SCENE_GLOBAL = "global"
+    SCENE_GROUP = "group"
+    SCENE_PRIVATE = "private"
 
     def __init__(self) -> None:
         self._data_dir = Path(StarTools.get_data_dir("astrbot_all_char"))
@@ -84,6 +120,26 @@ class UserMemoryStore:
                 "ON user_aliases(alias_type, alias_normalized)"
             )
             conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_scene_aliases (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    qq_id TEXT NOT NULL,
+                    alias TEXT NOT NULL,
+                    alias_normalized TEXT NOT NULL,
+                    scene_type TEXT NOT NULL,
+                    scene_value TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (qq_id, scene_type, scene_value, alias_normalized),
+                    FOREIGN KEY (qq_id) REFERENCES users(qq_id) ON DELETE CASCADE
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_user_scene_aliases_lookup "
+                "ON user_scene_aliases(qq_id, scene_type, scene_value, updated_at DESC)"
+            )
+            conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_users_updated_at ON users(updated_at DESC)"
             )
             conn.commit()
@@ -127,8 +183,56 @@ class UserMemoryStore:
             return ""
 
     @staticmethod
+    def _safe_group_id(event: AstrMessageEvent) -> str:
+        try:
+            group_id = event.get_group_id()
+            if group_id:
+                return str(group_id).strip()
+        except Exception:
+            pass
+        return ""
+
+    @staticmethod
+    def _safe_is_private_chat(event: AstrMessageEvent) -> bool:
+        try:
+            return bool(event.is_private_chat())
+        except Exception:
+            return False
+
+    @classmethod
+    def _normalize_scene_scope(cls, scene_type: Any, scene_value: Any = "") -> tuple[str, str]:
+        raw_scene_type = str(scene_type or "").strip().lower()
+        raw_scene_value = str(scene_value or "").strip()
+        if raw_scene_type in {cls.SCENE_GROUP, "群", "群聊"}:
+            digits = "".join(ch for ch in raw_scene_value if ch.isdigit())
+            return cls.SCENE_GROUP, digits
+        if raw_scene_type in {cls.SCENE_PRIVATE, "私聊"}:
+            return cls.SCENE_PRIVATE, ""
+        return cls.SCENE_GLOBAL, ""
+
+    @classmethod
+    def _scope_label(cls, scene_type: str, scene_value: str) -> str:
+        normalized_type, normalized_value = cls._normalize_scene_scope(scene_type, scene_value)
+        if normalized_type == cls.SCENE_GROUP:
+            return f"群聊 {normalized_value}" if normalized_value else "群聊"
+        if normalized_type == cls.SCENE_PRIVATE:
+            return "私聊"
+        return "全局"
+
+    @classmethod
+    def _event_scene_scope(cls, event: AstrMessageEvent | None) -> tuple[str, str]:
+        if not event:
+            return cls.SCENE_GLOBAL, ""
+        if cls._safe_is_private_chat(event):
+            return cls.SCENE_PRIVATE, ""
+        group_id = cls._safe_group_id(event)
+        if group_id:
+            return cls.SCENE_GROUP, group_id
+        return cls.SCENE_GLOBAL, ""
+
+    @staticmethod
     def _is_admin_event(event: AstrMessageEvent) -> bool:
-        return UserMemoryStore._safe_sender_id(event) == ADMIN_QQ_ID
+        return UserMemoryStore._safe_sender_id(event) in get_memory_admin_qq_ids()
 
     def _get_meta(self, conn: sqlite3.Connection, key: str) -> str:
         row = conn.execute("SELECT value FROM metadata WHERE key = ?", (key,)).fetchone()
@@ -215,6 +319,53 @@ class UserMemoryStore:
         )
         return True
 
+    def _upsert_scene_alias(
+        self,
+        conn: sqlite3.Connection,
+        qq_id: str,
+        alias: str,
+        scene_type: str,
+        scene_value: str = "",
+        *,
+        created_at: str | None = None,
+        updated_at: str | None = None,
+    ) -> bool:
+        qq_id = str(qq_id or "").strip()
+        alias = str(alias or "").strip()
+        normalized = self._normalize_alias(alias)
+        normalized_scene_type, normalized_scene_value = self._normalize_scene_scope(scene_type, scene_value)
+        if (
+            not qq_id
+            or not alias
+            or not normalized
+            or normalized_scene_type not in {self.SCENE_GROUP, self.SCENE_PRIVATE}
+            or (normalized_scene_type == self.SCENE_GROUP and not normalized_scene_value)
+        ):
+            return False
+
+        now = self._now_str()
+        conn.execute(
+            """
+            INSERT INTO user_scene_aliases (
+                qq_id, alias, alias_normalized, scene_type, scene_value, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(qq_id, scene_type, scene_value, alias_normalized) DO UPDATE SET
+                alias = excluded.alias,
+                updated_at = excluded.updated_at
+            """,
+            (
+                qq_id,
+                alias,
+                normalized,
+                normalized_scene_type,
+                normalized_scene_value,
+                created_at or now,
+                updated_at or now,
+            ),
+        )
+        return True
+
     def _fetch_aliases(
         self,
         conn: sqlite3.Connection,
@@ -241,14 +392,79 @@ class UserMemoryStore:
                 seen.add(normalized)
         return aliases
 
+    def _fetch_scene_aliases(
+        self,
+        conn: sqlite3.Connection,
+        qq_id: str,
+        *,
+        scene_type: str | None = None,
+        scene_value: str | None = None,
+    ) -> list[dict[str, Any]]:
+        cleaned_id = str(qq_id or "").strip()
+        if not cleaned_id:
+            return []
+
+        query = [
+            "SELECT id, qq_id, alias, alias_normalized, scene_type, scene_value, created_at, updated_at",
+            "FROM user_scene_aliases",
+            "WHERE qq_id = ?",
+        ]
+        params: list[Any] = [cleaned_id]
+        if scene_type is not None:
+            normalized_type, normalized_value = self._normalize_scene_scope(scene_type, scene_value)
+            query.append("AND scene_type = ?")
+            params.append(normalized_type)
+            if normalized_type == self.SCENE_GROUP:
+                query.append("AND scene_value = ?")
+                params.append(normalized_value)
+        query.append("ORDER BY updated_at DESC, id DESC")
+
+        rows = conn.execute(" ".join(query), tuple(params)).fetchall()
+        results: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for row in rows:
+            alias = str(row["alias"] or "").strip()
+            normalized_alias = self._normalize_alias(alias)
+            row_scene_type = str(row["scene_type"] or "").strip()
+            row_scene_value = str(row["scene_value"] or "").strip()
+            dedupe_key = (row_scene_type, row_scene_value, normalized_alias)
+            if not alias or not normalized_alias or dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            item = dict(row)
+            item["alias"] = alias
+            item["scene_type"] = row_scene_type
+            item["scene_value"] = row_scene_value
+            item["scope_label"] = self._scope_label(row_scene_type, row_scene_value)
+            results.append(item)
+        return results
+
+    def _pick_scene_alias_for_event(
+        self,
+        entry: dict[str, Any],
+        event: AstrMessageEvent | None,
+    ) -> dict[str, Any] | None:
+        scene_type, scene_value = self._event_scene_scope(event)
+        if scene_type == self.SCENE_GLOBAL:
+            return None
+        for item in entry.get("scoped_aliases") or []:
+            if (
+                str(item.get("scene_type") or "").strip() == scene_type
+                and str(item.get("scene_value") or "").strip() == scene_value
+            ):
+                return item
+        return None
+
     def _build_entry(self, conn: sqlite3.Connection, user_row: sqlite3.Row) -> dict[str, Any]:
         qq_id = str(user_row["qq_id"] or "").strip()
         memory_aliases = self._fetch_aliases(conn, qq_id, self.ALIAS_TYPE_MEMORY)
         platform_aliases = self._fetch_aliases(conn, qq_id, self.ALIAS_TYPE_PLATFORM)
+        scoped_aliases = self._fetch_scene_aliases(conn, qq_id)
         return {
             "qq_id": qq_id,
             "memory_name": memory_aliases[0] if memory_aliases else "",
             "memory_aliases": memory_aliases,
+            "scoped_aliases": scoped_aliases,
             "note": str(user_row["note"] or "").strip(),
             "platform_name": str(user_row["platform_name"] or "").strip(),
             "seen_names": platform_aliases,
@@ -266,7 +482,7 @@ class UserMemoryStore:
             results: list[dict[str, Any]] = []
             for row in rows:
                 entry = self._build_entry(conn, row)
-                has_manual_memory = bool(entry["memory_aliases"] or entry["note"])
+                has_manual_memory = bool(entry["memory_aliases"] or entry.get("scoped_aliases") or entry["note"])
                 if include_observed_only or has_manual_memory:
                     results.append(entry)
             return results
@@ -416,23 +632,36 @@ class UserMemoryStore:
         qq_id: str,
         memory_name: str | None = None,
         note: str | None = None,
+        scene_type: str | None = None,
+        scene_value: str | None = None,
     ) -> dict[str, Any]:
         qq_id = str(qq_id or "").strip()
         if not qq_id:
             return {}
 
         now = self._now_str()
+        normalized_scene_type, normalized_scene_value = self._normalize_scene_scope(scene_type, scene_value)
         with self._get_conn() as conn:
             self._ensure_user(conn, qq_id, created_at=now, updated_at=now)
 
             if memory_name is not None:
-                self._upsert_alias(
-                    conn,
-                    qq_id,
-                    str(memory_name).strip(),
-                    self.ALIAS_TYPE_MEMORY,
-                    updated_at=now,
-                )
+                if normalized_scene_type in {self.SCENE_GROUP, self.SCENE_PRIVATE}:
+                    self._upsert_scene_alias(
+                        conn,
+                        qq_id,
+                        str(memory_name).strip(),
+                        normalized_scene_type,
+                        normalized_scene_value,
+                        updated_at=now,
+                    )
+                else:
+                    self._upsert_alias(
+                        conn,
+                        qq_id,
+                        str(memory_name).strip(),
+                        self.ALIAS_TYPE_MEMORY,
+                        updated_at=now,
+                    )
 
             if note is not None:
                 conn.execute(
@@ -449,20 +678,37 @@ class UserMemoryStore:
             row = conn.execute("SELECT * FROM users WHERE qq_id = ?", (qq_id,)).fetchone()
             return self._build_entry(conn, row) if row else {}
 
-    def delete_alias(self, qq_id: str, alias: str) -> bool:
+    def delete_alias(
+        self,
+        qq_id: str,
+        alias: str,
+        *,
+        scene_type: str | None = None,
+        scene_value: str | None = None,
+    ) -> bool:
         qq_id = str(qq_id or "").strip()
         normalized = self._normalize_alias(alias)
         if not qq_id or not normalized:
             return False
 
+        normalized_scene_type, normalized_scene_value = self._normalize_scene_scope(scene_type, scene_value)
         with self._get_conn() as conn:
-            cursor = conn.execute(
-                """
-                DELETE FROM user_aliases
-                WHERE qq_id = ? AND alias_type = ? AND alias_normalized = ?
-                """,
-                (qq_id, self.ALIAS_TYPE_MEMORY, normalized),
-            )
+            if normalized_scene_type in {self.SCENE_GROUP, self.SCENE_PRIVATE}:
+                cursor = conn.execute(
+                    """
+                    DELETE FROM user_scene_aliases
+                    WHERE qq_id = ? AND scene_type = ? AND scene_value = ? AND alias_normalized = ?
+                    """,
+                    (qq_id, normalized_scene_type, normalized_scene_value, normalized),
+                )
+            else:
+                cursor = conn.execute(
+                    """
+                    DELETE FROM user_aliases
+                    WHERE qq_id = ? AND alias_type = ? AND alias_normalized = ?
+                    """,
+                    (qq_id, self.ALIAS_TYPE_MEMORY, normalized),
+                )
             deleted = cursor.rowcount > 0
             if deleted:
                 conn.execute(
@@ -471,6 +717,81 @@ class UserMemoryStore:
                 )
                 conn.commit()
             return deleted
+
+    def update_scene_alias(
+        self,
+        scene_alias_id: int,
+        *,
+        alias: str,
+        scene_type: str,
+        scene_value: str = "",
+    ) -> dict[str, Any] | None:
+        cleaned_alias = str(alias or "").strip()
+        normalized_scene_type, normalized_scene_value = self._normalize_scene_scope(scene_type, scene_value)
+        if (
+            not cleaned_alias
+            or normalized_scene_type not in {self.SCENE_GROUP, self.SCENE_PRIVATE}
+            or (normalized_scene_type == self.SCENE_GROUP and not normalized_scene_value)
+        ):
+            return None
+
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT qq_id, created_at FROM user_scene_aliases WHERE id = ?",
+                (scene_alias_id,),
+            ).fetchone()
+            if not row:
+                return None
+            qq_id = str(row["qq_id"] or "").strip()
+            created_at = str(row["created_at"] or self._now_str())
+            conn.execute("DELETE FROM user_scene_aliases WHERE id = ?", (scene_alias_id,))
+            self._upsert_scene_alias(
+                conn,
+                qq_id,
+                cleaned_alias,
+                normalized_scene_type,
+                normalized_scene_value,
+                created_at=created_at,
+                updated_at=self._now_str(),
+            )
+            conn.execute(
+                "UPDATE users SET updated_at = ? WHERE qq_id = ?",
+                (self._now_str(), qq_id),
+            )
+            conn.commit()
+            normalized_alias = self._normalize_alias(cleaned_alias)
+            refreshed = conn.execute(
+                """
+                SELECT id, qq_id, alias, alias_normalized, scene_type, scene_value, created_at, updated_at
+                FROM user_scene_aliases
+                WHERE qq_id = ? AND scene_type = ? AND scene_value = ? AND alias_normalized = ?
+                """,
+                (qq_id, normalized_scene_type, normalized_scene_value, normalized_alias),
+            ).fetchone()
+            if not refreshed:
+                return None
+            item = dict(refreshed)
+            item["scope_label"] = self._scope_label(normalized_scene_type, normalized_scene_value)
+            return item
+
+    def delete_scene_alias(self, scene_alias_id: int) -> tuple[bool, str]:
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT qq_id FROM user_scene_aliases WHERE id = ?",
+                (scene_alias_id,),
+            ).fetchone()
+            if not row:
+                return False, ""
+            qq_id = str(row["qq_id"] or "").strip()
+            cursor = conn.execute("DELETE FROM user_scene_aliases WHERE id = ?", (scene_alias_id,))
+            deleted = cursor.rowcount > 0
+            if deleted:
+                conn.execute(
+                    "UPDATE users SET updated_at = ? WHERE qq_id = ?",
+                    (self._now_str(), qq_id),
+                )
+                conn.commit()
+            return deleted, qq_id
 
     def get_memory(self, qq_id: str) -> dict[str, Any] | None:
         qq_id = str(qq_id or "").strip()
@@ -498,13 +819,98 @@ class UserMemoryStore:
     def list_memories(self) -> list[dict[str, Any]]:
         return self._list_entries(include_observed_only=False)
 
-    def format_memory(self, qq_id: str) -> str:
+    def list_all_memories(self) -> list[dict[str, Any]]:
+        return self._list_entries(include_observed_only=True)
+
+    def update_user_profile(
+        self,
+        qq_id: str,
+        *,
+        note: str | None = None,
+        platform_name: str | None = None,
+    ) -> dict[str, Any]:
+        qq_id = str(qq_id or "").strip()
+        if not qq_id:
+            return {}
+
+        now = self._now_str()
+        with self._get_conn() as conn:
+            self._ensure_user(conn, qq_id, created_at=now, updated_at=now)
+
+            updates: list[str] = ["updated_at = ?"]
+            params: list[Any] = [now]
+            if note is not None:
+                updates.append("note = ?")
+                params.append(str(note).strip())
+            if platform_name is not None:
+                cleaned_name = str(platform_name).strip()
+                updates.append("platform_name = ?")
+                params.append(cleaned_name)
+                if cleaned_name:
+                    self._upsert_alias(
+                        conn,
+                        qq_id,
+                        cleaned_name,
+                        self.ALIAS_TYPE_PLATFORM,
+                        updated_at=now,
+                    )
+
+            params.append(qq_id)
+            conn.execute(
+                f"UPDATE users SET {', '.join(updates)} WHERE qq_id = ?",
+                tuple(params),
+            )
+            conn.commit()
+            row = conn.execute("SELECT * FROM users WHERE qq_id = ?", (qq_id,)).fetchone()
+            return self._build_entry(conn, row) if row else {}
+
+    def search_memories(
+        self,
+        keyword: str = "",
+        *,
+        limit: int = 100,
+        include_observed_only: bool = True,
+    ) -> list[dict[str, Any]]:
+        records = self._list_entries(include_observed_only=include_observed_only)
+        normalized_keyword = self._normalize_alias(keyword)
+        if not normalized_keyword:
+            return records[:limit]
+
+        matched: list[tuple[int, dict[str, Any]]] = []
+        for entry in records:
+            qq_id = str(entry.get("qq_id") or "").strip()
+            if not qq_id:
+                continue
+
+            best_score = 0
+            for candidate, weight in self._entry_match_candidates(qq_id, entry):
+                normalized_candidate = self._normalize_alias(candidate)
+                if not normalized_candidate or normalized_keyword not in normalized_candidate:
+                    continue
+                best_score = max(best_score, weight + min(len(normalized_candidate), 12))
+
+            if best_score <= 0:
+                continue
+            matched.append((best_score, entry))
+
+        matched.sort(
+            key=lambda pair: (
+                -pair[0],
+                pair[1].get("updated_at", ""),
+                pair[1].get("qq_id", ""),
+            )
+        )
+        return [entry for _, entry in matched[:limit]]
+
+    def format_memory(self, qq_id: str, event: AstrMessageEvent | None = None) -> str:
         entry = self.get_memory(qq_id)
         if not entry:
             return f"未找到 QQ {qq_id} 的永久记忆。"
 
         memory_aliases = entry.get("memory_aliases") or []
+        scoped_aliases = entry.get("scoped_aliases") or []
         platform_aliases = entry.get("seen_names") or []
+        current_scene_alias = self._pick_scene_alias_for_event(entry, event)
         lines = [
             f"🧠 用户记忆：{qq_id}",
             f"记忆别名：{'、'.join(memory_aliases) if memory_aliases else '未设置'}",
@@ -512,9 +918,19 @@ class UserMemoryStore:
             f"备注：{entry.get('note') or '--'}",
             f"最近出现时间：{entry.get('last_seen_at') or '--'}",
         ]
+        if current_scene_alias:
+            lines.append(
+                f"当前场景称呼：{current_scene_alias.get('alias') or '--'}（{current_scene_alias.get('scope_label') or '当前场景'}）"
+            )
+        if scoped_aliases:
+            scene_text = "；".join(
+                f"{item.get('scope_label') or '场景'} = {item.get('alias') or '--'}"
+                for item in scoped_aliases[:8]
+            )
+            lines.append(f"场景别名：{scene_text}")
         if platform_aliases:
             lines.append(f"历史平台昵称：{', '.join(platform_aliases[:8])}")
-        if not memory_aliases:
+        if not memory_aliases and not scoped_aliases:
             lines.append("状态：当前只有自动识别信息，尚未录入管理员长期记忆。")
         return "\n".join(lines)
 
@@ -539,6 +955,8 @@ class UserMemoryStore:
         push(qq_id, 120)
         for alias in entry.get("memory_aliases") or []:
             push(alias, 110)
+        for scoped in entry.get("scoped_aliases") or []:
+            push(scoped.get("alias"), 108)
         push(entry.get("platform_name"), 95)
         push(entry.get("note"), 70)
         for seen_name in entry.get("seen_names") or []:
@@ -649,11 +1067,13 @@ class UserMemoryStore:
             )
 
         memory_aliases = entry.get("memory_aliases") or []
+        scoped_alias = self._pick_scene_alias_for_event(entry, event)
+        scoped_aliases = entry.get("scoped_aliases") or []
         platform_name = entry.get("platform_name") or sender_name
         note = entry.get("note") or ""
         seen_names = entry.get("seen_names") or []
 
-        if not memory_aliases and not note:
+        if not memory_aliases and not note and not scoped_aliases:
             if not platform_name:
                 return ""
             return (
@@ -666,18 +1086,27 @@ class UserMemoryStore:
         lines = [
             "【当前用户永久记忆】",
             f"- 当前对话用户 QQ: {qq_id}",
-            f"- 记忆别名: {'、'.join(memory_aliases) if memory_aliases else '未设置'}",
             f"- 当前平台昵称: {platform_name or '未知'}",
         ]
+        if scoped_alias:
+            lines.append(f"- 当前场景称呼: {scoped_alias.get('alias') or '未设置'}（{scoped_alias.get('scope_label') or '当前场景'}）")
+        lines.append(f"- 全局记忆别名: {'、'.join(memory_aliases) if memory_aliases else '未设置'}")
         if note:
             lines.append(f"- 备注: {note}")
+        if scoped_aliases:
+            scoped_text = "；".join(
+                f"{item.get('scope_label') or '场景'} = {item.get('alias') or '--'}"
+                for item in scoped_aliases[:5]
+            )
+            if scoped_text:
+                lines.append(f"- 其他场景别名: {scoped_text}")
         if seen_names:
             lines.append(f"- 历史平台昵称: {', '.join(seen_names[:5])}")
         lines.extend(
             [
                 "使用规则：",
                 "1. 你可以据此知道当前对话的人是谁。",
-                "2. 如果用户当下自称与记忆别名不同，以用户当下表达为准。",
+                "2. 如果群聊/私聊场景称呼与全局记忆不同，优先使用当前场景称呼。",
                 "3. 仅在合适的时候自然引用这些记忆，不要每次都生硬重复。",
                 "4. 不要编造未记录的身份、关系或经历。",
             ]
@@ -696,15 +1125,70 @@ def init_user_memory_store() -> UserMemoryStore:
 
 
 def _memory_permission_denied_text() -> str:
-    return f"永久记忆仅允许管理员使用。当前仅 QQ {ADMIN_QQ_ID} 可以管理记忆。"
+    if not get_memory_admin_qq_ids():
+        return "永久记忆管理员尚未配置，请先在 `memory_admin_qq_ids` 中添加管理员 QQ。"
+    return f"永久记忆仅允许管理员使用。当前允许的管理员 QQ：{get_memory_admin_display_text()}。"
 
 
-def _format_alias_add_result(entry: dict[str, Any], qq_id: str, alias: str, note: str) -> str:
+def _parse_memory_scene_spec(first_token: str, second_token: str = "") -> tuple[str, str, int] | None:
+    token = str(first_token or "").strip()
+    next_token = str(second_token or "").strip()
+    if not token:
+        return None
+    if token in {"全局", "global"}:
+        return UserMemoryStore.SCENE_GLOBAL, "", 1
+    if token in {"私聊", "private"}:
+        return UserMemoryStore.SCENE_PRIVATE, "", 1
+    if token in {"群", "群聊", "group"} and next_token:
+        scene_type, scene_value = UserMemoryStore._normalize_scene_scope(UserMemoryStore.SCENE_GROUP, next_token)
+        if scene_value:
+            return scene_type, scene_value, 2
+    for prefix in ("群:", "群聊:", "group:"):
+        if token.startswith(prefix):
+            scene_type, scene_value = UserMemoryStore._normalize_scene_scope(
+                UserMemoryStore.SCENE_GROUP,
+                token.split(":", 1)[1],
+            )
+            if scene_value:
+                return scene_type, scene_value, 1
+    return None
+
+
+def _extract_memory_scene_and_note(args: list[str], start_index: int) -> tuple[str, str, str]:
+    scene_type = UserMemoryStore.SCENE_GLOBAL
+    scene_value = ""
+    note_start = start_index
+    first = args[start_index] if len(args) > start_index else ""
+    second = args[start_index + 1] if len(args) > start_index + 1 else ""
+    parsed = _parse_memory_scene_spec(first, second)
+    if parsed:
+        scene_type, scene_value, consumed = parsed
+        note_start += consumed
+    note = " ".join(args[note_start:]).strip()
+    return scene_type, scene_value, note
+
+
+def _format_alias_add_result(
+    entry: dict[str, Any],
+    qq_id: str,
+    alias: str,
+    note: str,
+    *,
+    scene_type: str = UserMemoryStore.SCENE_GLOBAL,
+    scene_value: str = "",
+) -> str:
     aliases = entry.get("memory_aliases") or []
-    lines = [
-        f"已为 QQ {qq_id} 新增记忆别名：{alias}",
-        f"当前别名：{'、'.join(aliases) if aliases else alias}",
-    ]
+    lines = []
+    if scene_type in {UserMemoryStore.SCENE_GROUP, UserMemoryStore.SCENE_PRIVATE}:
+        lines.append(f"已为 QQ {qq_id} 新增场景称呼：{alias}")
+        lines.append(f"生效范围：{UserMemoryStore._scope_label(scene_type, scene_value)}")
+    else:
+        lines.extend(
+            [
+                f"已为 QQ {qq_id} 新增记忆别名：{alias}",
+                f"当前全局别名：{'、'.join(aliases) if aliases else alias}",
+            ]
+        )
     if note:
         lines.append(f"备注：{note}")
     return "\n".join(lines)
@@ -725,14 +1209,32 @@ async def handle_memory_command(event: AstrMessageEvent):
 
         args = parts[1:]
         if len(args) < 2 or not str(args[0]).strip().isdigit():
-            yield event.plain_result("用法：/认人 QQ号 别名 [备注]")
+            yield event.plain_result("用法：/认人 QQ号 别名 [全局|私聊|群:群号] [备注]")
             return
 
         qq_id = str(args[0]).strip()
         memory_name = args[1].strip()
-        note = " ".join(args[2:]).strip()
-        entry = store.set_memory(qq_id, memory_name=memory_name, note=note or None)
-        yield event.plain_result(_format_alias_add_result(entry, qq_id, memory_name, note))
+        scene_type, scene_value, note = _extract_memory_scene_and_note(args, 2)
+        if scene_type == UserMemoryStore.SCENE_GROUP and not scene_value:
+            yield event.plain_result("群聊场景认人时必须填写群号，例如：/认人 123456 阿周 群:987654321 同学群里的叫法")
+            return
+        entry = store.set_memory(
+            qq_id,
+            memory_name=memory_name,
+            note=note or None,
+            scene_type=scene_type,
+            scene_value=scene_value,
+        )
+        yield event.plain_result(
+            _format_alias_add_result(
+                entry,
+                qq_id,
+                memory_name,
+                note,
+                scene_type=scene_type,
+                scene_value=scene_value,
+            )
+        )
         return
 
     if len(parts) < 2:
@@ -758,23 +1260,59 @@ async def handle_memory_command(event: AstrMessageEvent):
             yield event.plain_result("无法识别当前 QQ 号，不能设置个人记忆。")
             return
         if not args:
-            yield event.plain_result("用法：/记忆 我是 别名 [备注]")
+            yield event.plain_result("用法：/记忆 我是 别名 [全局|私聊|群:群号] [备注]")
             return
         memory_name = args[0].strip()
-        note = " ".join(args[1:]).strip()
-        entry = store.set_memory(qq_id, memory_name=memory_name, note=note or None)
-        yield event.plain_result(_format_alias_add_result(entry, qq_id, memory_name, note))
+        scene_type, scene_value, note = _extract_memory_scene_and_note(args, 1)
+        if scene_type == UserMemoryStore.SCENE_GROUP and not scene_value:
+            yield event.plain_result("群聊场景认人时必须填写群号，例如：/记忆 我是 阿周 群:987654321 同学群里这样叫我")
+            return
+        entry = store.set_memory(
+            qq_id,
+            memory_name=memory_name,
+            note=note or None,
+            scene_type=scene_type,
+            scene_value=scene_value,
+        )
+        yield event.plain_result(
+            _format_alias_add_result(
+                entry,
+                qq_id,
+                memory_name,
+                note,
+                scene_type=scene_type,
+                scene_value=scene_value,
+            )
+        )
         return
 
     if subcommand in {"设置", "添加", "新增", "别名"}:
         if len(args) < 2 or not str(args[0]).strip().isdigit():
-            yield event.plain_result("用法：/记忆 设置 QQ号 别名 [备注]")
+            yield event.plain_result("用法：/记忆 设置 QQ号 别名 [全局|私聊|群:群号] [备注]")
             return
         qq_id = str(args[0]).strip()
         memory_name = args[1].strip()
-        note = " ".join(args[2:]).strip()
-        entry = store.set_memory(qq_id, memory_name=memory_name, note=note or None)
-        yield event.plain_result(_format_alias_add_result(entry, qq_id, memory_name, note))
+        scene_type, scene_value, note = _extract_memory_scene_and_note(args, 2)
+        if scene_type == UserMemoryStore.SCENE_GROUP and not scene_value:
+            yield event.plain_result("群聊场景认人时必须填写群号，例如：/记忆 设置 123456 阿周 群:987654321 同学群里的外号")
+            return
+        entry = store.set_memory(
+            qq_id,
+            memory_name=memory_name,
+            note=note or None,
+            scene_type=scene_type,
+            scene_value=scene_value,
+        )
+        yield event.plain_result(
+            _format_alias_add_result(
+                entry,
+                qq_id,
+                memory_name,
+                note,
+                scene_type=scene_type,
+                scene_value=scene_value,
+            )
+        )
         return
 
     if subcommand == "备注":
@@ -792,16 +1330,25 @@ async def handle_memory_command(event: AstrMessageEvent):
         if not qq_id:
             yield event.plain_result("用法：/记忆 查看 QQ号")
             return
-        yield event.plain_result(store.format_memory(qq_id))
+        yield event.plain_result(store.format_memory(qq_id, event if not args else None))
         return
 
     if subcommand in {"删除别名", "移除别名", "删别名"}:
         if len(args) < 2 or not str(args[0]).strip().isdigit():
-            yield event.plain_result("用法：/记忆 删除别名 QQ号 别名")
+            yield event.plain_result("用法：/记忆 删除别名 QQ号 别名 [全局|私聊|群:群号]")
             return
         qq_id = str(args[0]).strip()
-        alias = " ".join(args[1:]).strip()
-        deleted = store.delete_alias(qq_id, alias)
+        alias = str(args[1]).strip()
+        scene_type, scene_value, _ = _extract_memory_scene_and_note(args, 2)
+        if scene_type == UserMemoryStore.SCENE_GROUP and not scene_value:
+            yield event.plain_result("删除群聊场景别名时必须填写群号，例如：/记忆 删除别名 123456 阿周 群:987654321")
+            return
+        deleted = store.delete_alias(
+            qq_id,
+            alias,
+            scene_type=scene_type,
+            scene_value=scene_value,
+        )
         yield event.plain_result(
             f"已删除 QQ {qq_id} 的记忆别名：{alias}" if deleted else f"未找到 QQ {qq_id} 的记忆别名：{alias}"
         )
@@ -849,21 +1396,21 @@ async def handle_who_am_i_command(event: AstrMessageEvent):
     if not qq_id:
         yield event.plain_result("无法识别当前 QQ 号。")
         return
-    yield event.plain_result(store.format_memory(qq_id))
+    yield event.plain_result(store.format_memory(qq_id, event))
 
 
 async def _handle_memory_help(event: AstrMessageEvent):
     help_text = (
         "🧠 永久记忆说明（SQLite 版）\n\n"
-        f"• 管理权限：仅管理员 QQ {ADMIN_QQ_ID} 可以使用 /记忆、/认人、/我是谁\n"
+        f"• 管理权限：仅管理员 QQ {get_memory_admin_display_text()} 可以使用 /记忆、/认人、/我是谁\n"
         "• 自动识别：普通聊天进入模型前，会自动按当前 QQ 识别人物记忆并注入\n"
-        "• 多别名：同一个 QQ 可以录入多个记忆别名，适合同学名、外号、昵称并存\n"
+        "• 多别名：同一个 QQ 可以录入多个全局别名，还可以额外记录群聊 / 私聊场景称呼\n"
         "• 存储方式：记忆已改为 SQLite 持久化，并会自动兼容旧版 JSON 数据\n\n"
         "常用命令：\n"
-        "• /认人 QQ号 别名 [备注] - 快速给某个 QQ 新增一个记忆别名\n"
-        "• /记忆 设置 QQ号 别名 [备注] - 为指定 QQ 新增记忆别名\n"
+        "• /认人 QQ号 别名 [全局|私聊|群:群号] [备注] - 快速新增全局或场景别名\n"
+        "• /记忆 设置 QQ号 别名 [全局|私聊|群:群号] [备注] - 为指定 QQ 新增记忆别名\n"
         "• /记忆 备注 QQ号 内容 - 更新指定 QQ 的备注\n"
-        "• /记忆 删除别名 QQ号 别名 - 删除指定 QQ 的某个别名\n"
+        "• /记忆 删除别名 QQ号 别名 [全局|私聊|群:群号] - 删除指定别名\n"
         "• /记忆 查看 [QQ号] - 查看某人的永久记忆，不填默认查看自己\n"
         "• /记忆 删除 [QQ号] - 删除某个 QQ 的整条永久记忆\n"
         "• /记忆 列表 - 查看当前已录入的永久记忆\n"

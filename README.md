@@ -5,14 +5,40 @@
 - **命令模式**：所有功能均通过明确的前缀指令调用（见下方「所有指令一览」）。
 - **口语化 / Agent 调用**：插件注册了一组 LLM 工具（FunctionTool），在自然语言对话中由 Agent 自动选择并调用，无需记命令（见「口语化调用」与「已注册的 LLM 工具一览」）。
 
+### 记忆面板补充说明
+- 入口命令：`/记忆面板`
+- 子命令：
+  - `/记忆面板`
+  - `/记忆面板 状态`
+  - `/记忆面板 关闭`
+- 默认监听 `0.0.0.0:7835`，打开时会返回带临时 token 的访问链接。
+- 如需固定外网地址，可在 `memory_panel_public_base_url` 中填写 `http://你的IP:7835` 或你的域名地址。
+- 如果 `memory_panel_port` 被占用：
+  - 未配置 `memory_panel_public_base_url` 时，会自动顺延到下一个空闲端口启动
+  - 已配置 `memory_panel_public_base_url` 时，会提示你同步调整端口和公网地址
+- 面板支持查看和修改：
+  - 认人记忆与别名
+  - 被动偏好记忆
+  - 节点关系图谱与关系边
+  - 跨模块习惯记忆
+  - 事件回忆
+- 被动记忆增强点：
+  - 重复出现的偏好与关系会自动抬高置信度与证据次数
+  - 同一内容出现“喜欢/不喜欢”冲突时，会自动压低相反记忆的置信度
+  - 聊天中带时间感的个人经历会被被动提炼成事件摘要，后续消息提到“上次/之前/那次”等线索时，会自动补充相关事件回忆
+
 ---
 
 ## 永久记忆（SQLite 版）
 
 - 记忆存储已改为 SQLite，数据文件为 `user_memory.sqlite3`；如果之前存在旧版 `user_memory.json`，首次启动会自动迁移。
-- 记忆管理仅允许管理员 QQ `1102025067` 使用：`/记忆`、`/认人`、`/我是谁` 都会自动按发送者 QQ 校验权限。
+- 记忆管理仅允许配置中的管理员 QQ 使用：`/记忆`、`/认人`、`/我是谁`、`/记忆面板` 都会自动按发送者 QQ 校验权限。
+- 可通过 `memory_admin_qq_ids` 配置多个管理员 QQ，默认留空，需要你自己填写。
 - 普通聊天进入默认大模型前，会通过 `on_llm_request` 按当前 QQ 自动识别用户，并把对应的长期记忆注入给 bot。
 - 同一个 QQ 可以绑定多个记忆别名，适合同时记录本名、外号、昵称等多种叫法。
+- 新增“被动记忆”层：普通聊天中会自动提取较明确的称呼偏好、喜欢/不喜欢、人物关系，不需要额外下命令。
+- 新增“跨模块习惯记忆”层：天气、股票、基金、提醒、邮件这些高频功能在成功使用后，会自动沉淀常用城市、常看标的、常设提醒时间、常发邮箱等习惯。
+- 若同时启用了 `local_reminiscence`（APLR）插件，聊天前还会按“当前用户/当前消息提到的人”自动联动相关事件回忆，让 bot 不只知道“这个人是谁”，还更容易想起“和这个人发生过什么”。
 - 常用命令：
   - `/认人 QQ号 别名 [备注]`
   - `/记忆 设置 QQ号 别名 [备注]`
@@ -217,15 +243,17 @@
 ### 目录与代码结构
 
 - `main.py`：插件元信息、指令路由注册、LLM 工具注册，业务逻辑下沉到 utils。
-- `train_utils.py`、`sy_scheduler_utils.py`、`stock_utils.py`、`fund_analysis_utils.py`、`weather_utils.py`、`epic_utils.py`、`bookkeeping_utils.py`、`jrys_utils.py`、`ocr_utils.py`、`qianfan_search_utils.py`、`music_utils.py`、`anime_utils.py`、`email_utils.py`、`memory_utils.py`：各功能实现。
+- `train_utils.py`、`sy_scheduler_utils.py`、`stock_utils.py`、`fund_analysis_utils.py`、`weather_utils.py`、`epic_utils.py`、`bookkeeping_utils.py`、`jrys_utils.py`、`ocr_utils.py`、`qianfan_search_utils.py`、`music_utils.py`、`anime_utils.py`、`email_utils.py`、`memory_utils.py`、`passive_memory_utils.py`：各功能实现。
 - `fund_analyzer/`、`fund_stock/`、`eastmoney_api.py`：基金/量化分析与多智能体博弈分析的底层模块。
 - `memory_utils.py`：基于 SQLite 的 QQ 长期记忆层，支持旧版 JSON 自动迁移、管理员管理、多别名绑定，并在普通聊天进入 LLM 前自动注入当前用户记忆。
+- `passive_memory_utils.py`：被动记忆增强层，负责从自然聊天中抽取偏好/关系、从功能使用中沉淀习惯，并把人物身份与 APLR 事件回忆做联动注入。
 - 基金相关能力现已支持直接通过 `/基金` 调用，原 `/股票` 下的基金子命令保留兼容。
 - 股票行情与股票名称搜索已切到 `akshare` 路径；`/股票 搜索股票`、`/股票 查询`、自选股列表与提醒均通过这一链路取数，依赖 `akshare` 与 `pandas`。
 - `/基金 智能`、`/基金 博弈` 以及兼容的 `/股票 智能分析`、`/股票 股票智能分析` 依赖已配置的大模型提供商。
 - `/股票 量化分析`、`/股票 智能分析`、`/股票 股票智能分析` 现已切到真正的 A 股数据链路，使用 `akshare` 提供的 A 股实时行情、历史 K 线和个股资金流。
 - `/基金 博弈` 与 `/股票 股票智能分析` 当前都已收敛为 3 次 AI 对话：六维联合分析 1 次、多空综合辩论 1 次、裁判裁定 1 次。
 - 普通聊天进入默认大模型前，会通过 `on_llm_request` 钩子自动读取当前 QQ 的永久记忆，让 bot 先知道“当前这个人是谁”再回复；如果消息里提到其他已记录的人物，也会按 QQ / 别名 / 平台昵称做关联匹配。
+- 同一条聊天链路里，还会额外注入被动抽取到的偏好、关系图谱、跨模块使用习惯；若 APLR 插件可用，还会按当前人物身份自动联动相关旧事件片段。
 - 新增功能请优先新增独立 `xxx_utils.py`，并在本 README「已注册的 LLM 工具一览」中补充说明；同时提供命令入口与至少一个 LLM 工具（FunctionTool）封装。
 
 ### 配置统一（_conf_schema.json）
