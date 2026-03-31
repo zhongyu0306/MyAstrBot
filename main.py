@@ -979,10 +979,13 @@ class TrainQueryTool(FunctionTool[AstrAgentContext]):
         if not dep or not arr:
             return "请同时提供出发地和目的地，例如：出发地=厦门，目的地=上海。"
 
-        api_url = (getattr(cfg, "train_api_url", None) or "https://api.lolimi.cn/API/hc/api").rstrip(
+        api_url = (getattr(cfg, "train_api_url", None) or "https://kyfw.12306.cn/otn").rstrip(
             "/"
         )
-        api_data = await _fetch_trains(api_url, dep, arr)
+        try:
+            api_data = await _fetch_trains(api_url, dep, arr)
+        except ValueError as exc:
+            return str(exc)
         if not api_data:
             return "火车票查询失败或无数据，请检查出发地/目的地是否正确，或稍后重试。"
 

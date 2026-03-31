@@ -50,7 +50,7 @@ def get_memory_admin_display_text() -> str:
 
 
 class UserMemoryStore:
-    """基于 SQLite 的用户永久记忆。"""
+    """基于 SQLite 的用户永久记忆"""
 
     DB_NAME = "user_memory.sqlite3"
     LEGACY_JSON_NAME = "user_memory.json"
@@ -587,7 +587,7 @@ class UserMemoryStore:
                 )
 
     def observe_user(self, event: AstrMessageEvent) -> str:
-        """记录当前用户的 QQ 号和平台昵称。"""
+        """记录当前用户的 QQ 号和平台昵称"""
 
         qq_id = self._safe_sender_id(event)
         if not qq_id:
@@ -905,7 +905,7 @@ class UserMemoryStore:
     def format_memory(self, qq_id: str, event: AstrMessageEvent | None = None) -> str:
         entry = self.get_memory(qq_id)
         if not entry:
-            return f"未找到 QQ {qq_id} 的永久记忆。"
+            return f"未找到 QQ {qq_id} 的永久记忆"
 
         memory_aliases = entry.get("memory_aliases") or []
         scoped_aliases = entry.get("scoped_aliases") or []
@@ -931,7 +931,7 @@ class UserMemoryStore:
         if platform_aliases:
             lines.append(f"历史平台昵称：{', '.join(platform_aliases[:8])}")
         if not memory_aliases and not scoped_aliases:
-            lines.append("状态：当前只有自动识别信息，尚未录入管理员长期记忆。")
+            lines.append("状态：当前只有自动识别信息，尚未录入管理员长期记忆")
         return "\n".join(lines)
 
     @staticmethod
@@ -1040,15 +1040,15 @@ class UserMemoryStore:
         lines.extend(
             [
                 "使用规则：",
-                "1. 仅在用户这条消息明显提到相关对象时再引用这些记忆。",
-                "2. 如果记忆中的称呼和用户当下表达冲突，以用户当下表达为准。",
-                "3. 若不能确定用户指的是谁，不要把记忆强行套上去。",
+                "1. 仅在用户这条消息明显提到相关对象时再引用这些记忆",
+                "2. 如果记忆中的称呼和用户当下表达冲突，以用户当下表达为准",
+                "3. 若不能确定用户指的是谁，不要把记忆强行套上去",
             ]
         )
         return "\n".join(lines)
 
     def build_prompt_for_event(self, event: AstrMessageEvent) -> str:
-        """为当前对话用户构建注入给 LLM 的永久记忆提示。"""
+        """为当前对话用户构建注入给 LLM 的永久记忆提示"""
 
         qq_id = self._safe_sender_id(event)
         if not qq_id:
@@ -1063,7 +1063,7 @@ class UserMemoryStore:
                 "【用户识别信息】\n"
                 f"- 当前对话用户 QQ: {qq_id}\n"
                 f"- 当前平台昵称: {sender_name}\n"
-                "说明：这是你当前正在对话的用户信息，但暂未设置管理员录入的永久记忆。"
+                "说明：这是你当前正在对话的用户信息，但暂未设置管理员录入的永久记忆"
             )
 
         memory_aliases = entry.get("memory_aliases") or []
@@ -1080,7 +1080,7 @@ class UserMemoryStore:
                 "【用户识别信息】\n"
                 f"- 当前对话用户 QQ: {qq_id}\n"
                 f"- 当前平台昵称: {platform_name}\n"
-                "说明：这是你当前正在对话的用户信息，系统已自动识别 QQ 与平台昵称，但管理员尚未录入长期人物记忆。"
+                "说明：这是你当前正在对话的用户信息，系统已自动识别 QQ 与平台昵称，但管理员尚未录入长期人物记忆"
             )
 
         lines = [
@@ -1105,10 +1105,10 @@ class UserMemoryStore:
         lines.extend(
             [
                 "使用规则：",
-                "1. 你可以据此知道当前对话的人是谁。",
-                "2. 如果群聊/私聊场景称呼与全局记忆不同，优先使用当前场景称呼。",
-                "3. 仅在合适的时候自然引用这些记忆，不要每次都生硬重复。",
-                "4. 不要编造未记录的身份、关系或经历。",
+                "1. 你可以据此知道当前对话的人是谁",
+                "2. 如果群聊/私聊场景称呼与全局记忆不同，优先使用当前场景称呼",
+                "3. 仅在合适的时候自然引用这些记忆，不要每次都生硬重复",
+                "4. 不要编造未记录的身份、关系或经历",
             ]
         )
         return "\n".join(lines)
@@ -1126,8 +1126,8 @@ def init_user_memory_store() -> UserMemoryStore:
 
 def _memory_permission_denied_text() -> str:
     if not get_memory_admin_qq_ids():
-        return "永久记忆管理员尚未配置，请先在 `memory_admin_qq_ids` 中添加管理员 QQ。"
-    return f"永久记忆仅允许管理员使用。当前允许的管理员 QQ：{get_memory_admin_display_text()}。"
+        return "永久记忆管理员尚未配置，请先在 `memory_admin_qq_ids` 中添加管理员 QQ"
+    return f"永久记忆仅允许管理员使用当前允许的管理员 QQ：{get_memory_admin_display_text()}"
 
 
 def _parse_memory_scene_spec(first_token: str, second_token: str = "") -> tuple[str, str, int] | None:
@@ -1257,7 +1257,7 @@ async def handle_memory_command(event: AstrMessageEvent):
     if subcommand in {"我是", "设置我"}:
         qq_id = store._safe_sender_id(event)
         if not qq_id:
-            yield event.plain_result("无法识别当前 QQ 号，不能设置个人记忆。")
+            yield event.plain_result("无法识别当前 QQ 号，不能设置个人记忆")
             return
         if not args:
             yield event.plain_result("用法：/记忆 我是 别名 [全局|私聊|群:群号] [备注]")
@@ -1361,14 +1361,14 @@ async def handle_memory_command(event: AstrMessageEvent):
             return
         deleted = store.delete_memory(qq_id)
         yield event.plain_result(
-            f"已删除 QQ {qq_id} 的永久记忆。" if deleted else f"未找到 QQ {qq_id} 的永久记忆。"
+            f"已删除 QQ {qq_id} 的永久记忆" if deleted else f"未找到 QQ {qq_id} 的永久记忆"
         )
         return
 
     if subcommand == "列表":
         records = store.list_memories()
         if not records:
-            yield event.plain_result("当前还没有任何已录入的永久记忆。")
+            yield event.plain_result("当前还没有任何已录入的永久记忆")
             return
 
         lines = ["🧠 永久记忆列表："]
@@ -1379,7 +1379,7 @@ async def handle_memory_command(event: AstrMessageEvent):
                 f"- QQ {item.get('qq_id', '--')} | 别名: {alias_text} | 昵称: {item.get('platform_name') or '--'}"
             )
         if len(records) > 50:
-            lines.append(f"以上展示前 50 条，共 {len(records)} 条。")
+            lines.append(f"以上展示前 50 条，共 {len(records)} 条")
         yield event.plain_result("\n".join(lines))
         return
 
@@ -1394,7 +1394,7 @@ async def handle_who_am_i_command(event: AstrMessageEvent):
         yield event.plain_result(_memory_permission_denied_text())
         return
     if not qq_id:
-        yield event.plain_result("无法识别当前 QQ 号。")
+        yield event.plain_result("无法识别当前 QQ 号")
         return
     yield event.plain_result(store.format_memory(qq_id, event))
 
