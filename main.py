@@ -79,6 +79,8 @@ from .email_subscription_utils import (
 )
 from .memory_utils import (
     configure_memory_admin_qq_ids,
+    configure_memory_observe_user_throttle_seconds,
+    configure_related_memory_cache_ttl_seconds,
     handle_memory_command,
     handle_who_am_i_command,
     init_user_memory_store,
@@ -99,6 +101,116 @@ def _get_effective_config(ctx: Context, plugin_config: AstrBotConfig | None) -> 
     if base_cfg is None:
         return {}
     return ensure_flat_config(base_cfg)
+
+
+_MEMORY_RECALL_HINTS = (
+    "还记得",
+    "记不记得",
+    "上次",
+    "之前",
+    "那次",
+    "那天",
+    "当时",
+    "后来",
+    "以前",
+    "回忆",
+)
+
+_MEMORY_TEMPORAL_HINTS = (
+    "今天",
+    "昨天",
+    "前天",
+    "上周",
+    "上个月",
+    "去年",
+)
+
+_MEMORY_ACTION_HINTS = (
+    "说过",
+    "提过",
+    "聊过",
+    "发生",
+    "一起",
+    "见过",
+    "去过",
+)
+
+
+def _to_int_in_range(value: object, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except Exception:
+        parsed = default
+    if parsed < minimum:
+        return minimum
+    if parsed > maximum:
+        return maximum
+    return parsed
+
+
+def _trim_prompt_part_to_budget(text: str, budget_chars: int) -> str:
+    content = str(text or "").strip()
+    if not content or budget_chars <= 0:
+        return ""
+    if len(content) <= budget_chars:
+        return content
+    if budget_chars <= 24:
+        return content[:budget_chars]
+
+    clipped = content[:budget_chars]
+    last_break = clipped.rfind("\n")
+    if last_break >= int(budget_chars * 0.6):
+        clipped = clipped[:last_break]
+    suffix = "\n...(记忆内容已按预算截断)"
+    hard_cap = max(0, budget_chars - len(suffix))
+    clipped = clipped[:hard_cap].rstrip()
+    return f"{clipped}{suffix}" if clipped else content[:budget_chars]
+
+
+def _compose_memory_prompt_with_budget(named_parts: list[tuple[str, str]], max_chars: int) -> tuple[str, list[str], int]:
+    part_caps = {
+        "memory_prompt": 700,
+        "passive_profile_prompt": 450,
+        "event_recall_prompt": 320,
+        "related_prompt": 320,
+        "reminiscence_prompt": 520,
+    }
+    used = 0
+    included_names: list[str] = []
+    assembled: list[str] = []
+    for name, raw_text in named_parts:
+        text = str(raw_text or "").strip()
+        if not text:
+            continue
+        remaining = max_chars - used
+        if remaining <= 0:
+            break
+        cap = min(remaining, part_caps.get(name, remaining))
+        part = _trim_prompt_part_to_budget(text, cap)
+        if not part:
+            continue
+        assembled.append(part)
+        included_names.append(name)
+        used += len(part)
+    return "\n\n".join(assembled), included_names, used
+
+
+def _should_trigger_reminiscence(
+    message_text: str,
+    *,
+    related_prompt: str,
+    min_message_length: int,
+) -> bool:
+    message = str(message_text or "").strip()
+    if not message or message.startswith("/") or len(message) < min_message_length:
+        return False
+    if any(hint in message for hint in _MEMORY_RECALL_HINTS):
+        return True
+    if related_prompt:
+        return True
+    has_temporal = any(hint in message for hint in _MEMORY_TEMPORAL_HINTS)
+    has_action = any(hint in message for hint in _MEMORY_ACTION_HINTS)
+    return has_temporal and has_action
 
 
 class _CmdWrappedEvent:
@@ -143,6 +255,12 @@ class AllCharPlugin(Star):
         # 初始化用户永久记忆存储
         init_user_memory_store()
         configure_memory_admin_qq_ids(getattr(self.config, "memory_admin_qq_ids", None))
+        configure_memory_observe_user_throttle_seconds(
+            getattr(self.config, "memory_observe_user_throttle_seconds", 120)
+        )
+        configure_related_memory_cache_ttl_seconds(
+            getattr(self.config, "memory_related_memory_cache_ttl_seconds", 60)
+        )
         init_passive_memory_store()
         maybe_autostart_memory_panel(self.context, self.config)
 
@@ -445,38 +563,63 @@ class AllCharPlugin(Star):
         except Exception:
             message_text = ""
         passive_store.observe_message(event)
+
+        memory_prompt_max_chars = _to_int_in_range(
+            getattr(self.config, "memory_prompt_max_chars", 1800),
+            default=1800,
+            minimum=400,
+            maximum=12000,
+        )
+        reminiscence_min_message_length = _to_int_in_range(
+            getattr(self.config, "memory_reminiscence_min_message_length", 8),
+            default=8,
+            minimum=1,
+            maximum=200,
+        )
+
         memory_prompt = store.build_prompt_for_event(event)
         passive_profile_prompt = passive_store.build_profile_prompt(event)
+        event_recall_enabled = bool(getattr(self.config, "memory_event_recall_enabled", True))
         event_recall_prompt = (
             passive_store.build_event_recall_prompt(
                 event,
                 message_text=message_text,
             )
-            if getattr(self.config, "memory_event_recall_enabled", True)
+            if event_recall_enabled
             else ""
         )
         related_prompt = store.build_related_memories_prompt(
             message_text,
             exclude_qq_ids={qq_id} if qq_id else None,
         )
-        reminiscence_prompt = passive_store.build_reminiscence_bridge_prompt(
-            self.context,
-            event,
-            message_text=message_text,
+        reminiscence_enabled = bool(getattr(self.config, "memory_reminiscence_enabled", True))
+        should_trigger_reminiscence = reminiscence_enabled and _should_trigger_reminiscence(
+            message_text,
+            related_prompt=related_prompt,
+            min_message_length=reminiscence_min_message_length,
+        )
+        reminiscence_prompt = (
+            passive_store.build_reminiscence_bridge_prompt(
+                self.context,
+                event,
+                message_text=message_text,
+            )
+            if should_trigger_reminiscence
+            else ""
         )
 
-        prompt_parts = [
-            part
-            for part in (
-                memory_prompt,
-                passive_profile_prompt,
-                event_recall_prompt,
-                related_prompt,
-                reminiscence_prompt,
-            )
-            if part
+        named_parts = [
+            ("memory_prompt", memory_prompt),
+            ("passive_profile_prompt", passive_profile_prompt),
+            ("event_recall_prompt", event_recall_prompt),
+            ("related_prompt", related_prompt),
+            ("reminiscence_prompt", reminiscence_prompt),
         ]
-        if not prompt_parts:
+        extra_prompt, included_parts, used_chars = _compose_memory_prompt_with_budget(
+            named_parts,
+            memory_prompt_max_chars,
+        )
+        if not extra_prompt:
             logger.info(
                 "[astrbot_all_char] on_llm_request 未生成用户记忆提示词: sender_id=%s",
                 qq_id or "unknown",
@@ -484,13 +627,20 @@ class AllCharPlugin(Star):
             return
 
         base_prompt = getattr(req, "system_prompt", "") or ""
-        extra_prompt = "\n\n".join(prompt_parts)
         joiner = "\n\n" if base_prompt else ""
         req.system_prompt = f"{base_prompt}{joiner}{extra_prompt}"
         logger.info(
-            "[astrbot_all_char] on_llm_request 注入后的 system_prompt: sender_id=%s\n%s",
+            (
+                "[astrbot_all_char] on_llm_request 记忆注入完成: sender_id=%s, included=%s, "
+                "used_chars=%s/%s, event_recall=%s, reminiscence=%s, final_system_prompt_chars=%s"
+            ),
             qq_id or "unknown",
-            req.system_prompt,
+            ",".join(included_parts),
+            used_chars,
+            memory_prompt_max_chars,
+            event_recall_enabled,
+            bool(reminiscence_prompt),
+            len(req.system_prompt or ""),
         )
 
     # ---------------- LLM Tools（供 AI 自动调用） ----------------
@@ -545,30 +695,37 @@ class AllCharPlugin(Star):
         event: AstrMessageEvent,
         departure: str,
         arrival: str,
+        travel_date: str | None = None,
     ):
         """查询两地之间的火车票/车次信息。
 
         使用建议（给 LLM 的决策规则）：
         - 用户询问两地之间的火车/车次/高铁/动车：优先调用本工具；
-        - 若用户已明确出发地和目的地（如“帮我查一下明天厦门到上海的火车”），请填充 departure/arrival 并调用；
+        - 若用户已明确出发地、目的地和日期（如“帮我查一下4月20号厦门到上海的火车”），请同时填充 `departure/arrival/travel_date`；
         - 仅当用户只问“怎么坐火车”“高铁要多久”且没有具体城市时，再考虑纯聊天回答。
 
         Args:
             departure(string): 出发地城市或站点名称，例如 厦门。
             arrival(string): 目的地城市或站点名称，例如 上海。
+            travel_date(string, optional): 出行日期，可传 `YYYY-MM-DD`、`YYYY年M月D日`、`M月D日/号`、`今天/明天/后天/大后天`。
         """
         logger.info(
-            "[astrbot_all_char][LLMTool] 火车票查询工具被调用，参数 departure=%s, arrival=%s",
+            "[astrbot_all_char][LLMTool] 火车票查询工具被调用，参数 departure=%s, arrival=%s, travel_date=%s",
             departure,
             arrival,
+            travel_date,
         )
         dep = (departure or "").strip()
         arr = (arrival or "").strip()
+        date_text = (travel_date or "").strip()
         if not dep or not arr:
             yield event.plain_result("请同时提供出发地和目的地，例如：departure=厦门, arrival=上海。")
             return
 
-        fake = f"/火车票 {dep} {arr}"
+        parts = ["/火车票", dep, arr]
+        if date_text:
+            parts.append(date_text)
+        fake = " ".join(parts)
         wrapped = _CmdWrappedEvent(event, fake)
         async for result in handle_train_command(wrapped, self.config):
             yield result
@@ -959,6 +1116,10 @@ class TrainQueryTool(FunctionTool[AstrAgentContext]):
                     "type": "string",
                     "description": "目的地城市或站点名称，例如 上海。",
                 },
+                "travel_date": {
+                    "type": "string",
+                    "description": "出行日期（可选），支持 YYYY-MM-DD、YYYY年M月D日、M月D日/号、今天/明天/后天/大后天。",
+                },
             },
             "required": ["departure", "arrival"],
         }
@@ -969,6 +1130,7 @@ class TrainQueryTool(FunctionTool[AstrAgentContext]):
         context: ContextWrapper[AstrAgentContext],
         departure: str,
         arrival: str,
+        travel_date: str | None = None,
         **kwargs,
     ) -> ToolExecResult:
         ctx = context.context.context
@@ -976,6 +1138,7 @@ class TrainQueryTool(FunctionTool[AstrAgentContext]):
 
         dep = (departure or "").strip()
         arr = (arrival or "").strip()
+        date_text = (travel_date or "").strip()
         if not dep or not arr:
             return "请同时提供出发地和目的地，例如：出发地=厦门，目的地=上海。"
 
@@ -983,14 +1146,16 @@ class TrainQueryTool(FunctionTool[AstrAgentContext]):
             "/"
         )
         try:
-            api_data = await _fetch_trains(api_url, dep, arr)
+            api_data = await _fetch_trains(api_url, dep, arr, date_text or None)
         except ValueError as exc:
             return str(exc)
         if not api_data:
             return "火车票查询失败或无数据，请检查出发地/目的地是否正确，或稍后重试。"
 
         text = _format_train_text(api_data)
-        return f"🚆 火车票查询：{dep} → {arr}\n\n{text}"
+        query_date = str(api_data.get("date", "")).strip()
+        title_suffix = f"（{query_date}）" if query_date else ""
+        return f"🚆 火车票查询：{dep} → {arr}{title_suffix}\n\n{text}"
 
 
 @dataclass

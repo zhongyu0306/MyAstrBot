@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +17,8 @@ from astrbot.api.star import StarTools
 
 DEFAULT_ADMIN_QQ_IDS: tuple[str, ...] = ()
 _configured_admin_qq_ids: tuple[str, ...] = DEFAULT_ADMIN_QQ_IDS
+DEFAULT_OBSERVE_USER_THROTTLE_SECONDS = 120
+DEFAULT_RELATED_MEMORY_CACHE_TTL_SECONDS = 60
 
 
 def _normalize_admin_qq_ids(raw_value: Any) -> tuple[str, ...]:
@@ -65,6 +69,17 @@ class UserMemoryStore:
         self._data_dir.mkdir(parents=True, exist_ok=True)
         self._db_path = self._data_dir / self.DB_NAME
         self._legacy_json_path = self._data_dir / self.LEGACY_JSON_NAME
+        self._observe_user_throttle_seconds = DEFAULT_OBSERVE_USER_THROTTLE_SECONDS
+        self._observe_user_cache: dict[str, tuple[float, str]] = {}
+        self._related_memory_cache_ttl_seconds = DEFAULT_RELATED_MEMORY_CACHE_TTL_SECONDS
+        self._related_memory_cache_lock = threading.RLock()
+        self._related_memory_cache_ready = False
+        self._related_memory_cache_built_at = 0.0
+        self._related_memory_entries_cache: list[dict[str, Any]] = []
+        self._related_memory_candidates_cache: dict[str, list[tuple[str, int]]] = {}
+        self._related_memory_entries_by_qq_cache: dict[str, dict[str, Any]] = {}
+        self._related_memory_inverted_index_cache: dict[str, list[tuple[str, int]]] = {}
+        self._related_memory_prefix_index_cache: dict[str, list[str]] = {}
         self._init_db()
         self._maybe_migrate_from_json()
 
@@ -147,6 +162,183 @@ class UserMemoryStore:
     @staticmethod
     def _now_str() -> str:
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    @staticmethod
+    def _clamp_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+        try:
+            parsed = int(value)
+        except Exception:
+            parsed = default
+        if parsed < minimum:
+            return minimum
+        if parsed > maximum:
+            return maximum
+        return parsed
+
+    def set_observe_user_throttle_seconds(self, seconds: Any) -> int:
+        self._observe_user_throttle_seconds = self._clamp_int(
+            seconds,
+            default=DEFAULT_OBSERVE_USER_THROTTLE_SECONDS,
+            minimum=0,
+            maximum=24 * 3600,
+        )
+        return self._observe_user_throttle_seconds
+
+    def set_related_memory_cache_ttl_seconds(self, seconds: Any) -> int:
+        self._related_memory_cache_ttl_seconds = self._clamp_int(
+            seconds,
+            default=DEFAULT_RELATED_MEMORY_CACHE_TTL_SECONDS,
+            minimum=0,
+            maximum=24 * 3600,
+        )
+        self._invalidate_related_memory_cache()
+        return self._related_memory_cache_ttl_seconds
+
+    def _should_skip_observe_write(self, qq_id: str, sender_name: str, now_tick: float) -> bool:
+        throttle = self._observe_user_throttle_seconds
+        if throttle <= 0:
+            return False
+        cached = self._observe_user_cache.get(qq_id)
+        if not cached:
+            return False
+        last_tick, last_name = cached
+        if now_tick - last_tick >= throttle:
+            return False
+        # 节流窗口内若昵称变化，仍然立即落库，避免错过最新平台昵称
+        if sender_name and sender_name != last_name:
+            return False
+        return True
+
+    def _touch_observe_cache(self, qq_id: str, sender_name: str, now_tick: float) -> None:
+        current = self._observe_user_cache.get(qq_id)
+        cached_name = sender_name or (current[1] if current else "")
+        self._observe_user_cache[qq_id] = (now_tick, cached_name)
+        if len(self._observe_user_cache) > 4096:
+            threshold = now_tick - max(300.0, float(self._observe_user_throttle_seconds) * 2.0)
+            self._observe_user_cache = {
+                key: value for key, value in self._observe_user_cache.items() if value[0] >= threshold
+            }
+
+    def _invalidate_related_memory_cache(self) -> None:
+        with self._related_memory_cache_lock:
+            self._related_memory_cache_ready = False
+            self._related_memory_cache_built_at = 0.0
+            self._related_memory_entries_cache = []
+            self._related_memory_candidates_cache = {}
+            self._related_memory_entries_by_qq_cache = {}
+            self._related_memory_inverted_index_cache = {}
+            self._related_memory_prefix_index_cache = {}
+
+    def _prepare_entry_match_candidates(self, qq_id: str, entry: dict[str, Any]) -> list[tuple[str, int]]:
+        prepared: list[tuple[str, int]] = []
+        seen: set[str] = set()
+        for candidate, weight in self._entry_match_candidates(qq_id, entry):
+            normalized_candidate = self._normalize_alias(candidate)
+            if not normalized_candidate or normalized_candidate in seen:
+                continue
+            seen.add(normalized_candidate)
+            prepared.append((normalized_candidate, weight + min(len(normalized_candidate), 12)))
+        return prepared
+
+    def _rebuild_related_memory_cache_locked(self, now_tick: float) -> None:
+        started = time.monotonic()
+        entries = self._list_entries(include_observed_only=False)
+        entries_by_qq: dict[str, dict[str, Any]] = {}
+        candidates: dict[str, list[tuple[str, int]]] = {}
+        inverted_temp: dict[str, dict[str, int]] = {}
+        for entry in entries:
+            qq_id = str(entry.get("qq_id") or "").strip()
+            if not qq_id:
+                continue
+            entries_by_qq[qq_id] = entry
+            prepared = self._prepare_entry_match_candidates(qq_id, entry)
+            if prepared:
+                candidates[qq_id] = prepared
+                for normalized_candidate, score in prepared:
+                    score_map = inverted_temp.setdefault(normalized_candidate, {})
+                    old_score = score_map.get(qq_id, 0)
+                    if score > old_score:
+                        score_map[qq_id] = score
+
+        inverted_index: dict[str, list[tuple[str, int]]] = {}
+        prefix_index: dict[str, list[str]] = {}
+        mapping_count = 0
+        for normalized_candidate, score_map in inverted_temp.items():
+            pairs = sorted(score_map.items(), key=lambda item: (-item[1], item[0]))
+            inverted_index[normalized_candidate] = pairs
+            mapping_count += len(pairs)
+            prefix = normalized_candidate[0]
+            prefix_index.setdefault(prefix, []).append(normalized_candidate)
+
+        for prefix, candidate_list in prefix_index.items():
+            candidate_list.sort(key=lambda item: (-len(item), item))
+
+        self._related_memory_entries_cache = entries
+        self._related_memory_candidates_cache = candidates
+        self._related_memory_entries_by_qq_cache = entries_by_qq
+        self._related_memory_inverted_index_cache = inverted_index
+        self._related_memory_prefix_index_cache = prefix_index
+        self._related_memory_cache_built_at = now_tick
+        self._related_memory_cache_ready = True
+        logger.info(
+            (
+                "[astrbot_all_char][memory] 相关人物索引重建: entries=%s, candidates=%s, "
+                "mappings=%s, cost_ms=%s, ttl=%ss"
+            ),
+            len(entries_by_qq),
+            len(inverted_index),
+            mapping_count,
+            int((time.monotonic() - started) * 1000),
+            self._related_memory_cache_ttl_seconds,
+        )
+
+    def _get_related_memory_cache(
+        self,
+    ) -> tuple[dict[str, dict[str, Any]], dict[str, list[tuple[str, int]]], dict[str, list[str]], bool]:
+        ttl = self._related_memory_cache_ttl_seconds
+        now_tick = time.monotonic()
+        with self._related_memory_cache_lock:
+            need_refresh = not self._related_memory_cache_ready
+            if not need_refresh and ttl > 0:
+                need_refresh = (now_tick - self._related_memory_cache_built_at) >= ttl
+            cache_hit = not need_refresh and ttl > 0
+            if need_refresh or ttl <= 0:
+                self._rebuild_related_memory_cache_locked(now_tick)
+                cache_hit = False
+            return (
+                self._related_memory_entries_by_qq_cache,
+                self._related_memory_inverted_index_cache,
+                self._related_memory_prefix_index_cache,
+                cache_hit,
+            )
+
+    @staticmethod
+    def _extract_matching_candidates(
+        normalized_text: str,
+        prefix_index: dict[str, list[str]],
+        *,
+        max_candidates: int = 256,
+    ) -> set[str]:
+        if not normalized_text or not prefix_index:
+            return set()
+
+        text_len = len(normalized_text)
+        matched: set[str] = set()
+        for index, ch in enumerate(normalized_text):
+            candidates = prefix_index.get(ch)
+            if not candidates:
+                continue
+            remain_len = text_len - index
+            for candidate in candidates:
+                if candidate in matched:
+                    continue
+                if len(candidate) > remain_len:
+                    continue
+                if normalized_text.startswith(candidate, index):
+                    matched.add(candidate)
+                    if len(matched) >= max_candidates:
+                        return matched
+        return matched
 
     @staticmethod
     def _normalize_alias(value: Any) -> str:
@@ -581,6 +773,7 @@ class UserMemoryStore:
             self._set_meta(conn, "legacy_json_migrated", "1")
             conn.commit()
             if migrated_count:
+                self._invalidate_related_memory_cache()
                 logger.info(
                     "[astrbot_all_char] 已从旧版 JSON 迁移 %s 条用户记忆到 SQLite",
                     migrated_count,
@@ -594,6 +787,10 @@ class UserMemoryStore:
             return ""
 
         sender_name = self._safe_sender_name(event)
+        now_tick = time.monotonic()
+        if self._should_skip_observe_write(qq_id, sender_name, now_tick):
+            return qq_id
+
         now = self._now_str()
         with self._get_conn() as conn:
             self._ensure_user(conn, qq_id, created_at=now, updated_at=now, last_seen_at=now)
@@ -625,6 +822,8 @@ class UserMemoryStore:
                 )
             conn.commit()
 
+        self._invalidate_related_memory_cache()
+        self._touch_observe_cache(qq_id, sender_name, now_tick)
         return qq_id
 
     def set_memory(
@@ -675,6 +874,7 @@ class UserMemoryStore:
                 )
 
             conn.commit()
+            self._invalidate_related_memory_cache()
             row = conn.execute("SELECT * FROM users WHERE qq_id = ?", (qq_id,)).fetchone()
             return self._build_entry(conn, row) if row else {}
 
@@ -716,6 +916,7 @@ class UserMemoryStore:
                     (self._now_str(), qq_id),
                 )
                 conn.commit()
+                self._invalidate_related_memory_cache()
             return deleted
 
     def update_scene_alias(
@@ -759,6 +960,7 @@ class UserMemoryStore:
                 (self._now_str(), qq_id),
             )
             conn.commit()
+            self._invalidate_related_memory_cache()
             normalized_alias = self._normalize_alias(cleaned_alias)
             refreshed = conn.execute(
                 """
@@ -791,6 +993,7 @@ class UserMemoryStore:
                     (self._now_str(), qq_id),
                 )
                 conn.commit()
+                self._invalidate_related_memory_cache()
             return deleted, qq_id
 
     def get_memory(self, qq_id: str) -> dict[str, Any] | None:
@@ -814,6 +1017,7 @@ class UserMemoryStore:
             deleted = cursor.rowcount > 0
             if deleted:
                 conn.commit()
+                self._invalidate_related_memory_cache()
             return deleted
 
     def list_memories(self) -> list[dict[str, Any]]:
@@ -834,6 +1038,7 @@ class UserMemoryStore:
             return {}
 
         now = self._now_str()
+        invalidate_related_cache = bool(note is not None or platform_name is not None)
         with self._get_conn() as conn:
             self._ensure_user(conn, qq_id, created_at=now, updated_at=now)
 
@@ -861,6 +1066,8 @@ class UserMemoryStore:
                 tuple(params),
             )
             conn.commit()
+            if invalidate_related_cache:
+                self._invalidate_related_memory_cache()
             row = conn.execute("SELECT * FROM users WHERE qq_id = ?", (qq_id,)).fetchone()
             return self._build_entry(conn, row) if row else {}
 
@@ -982,27 +1189,30 @@ class UserMemoryStore:
             for item in (exclude_qq_ids or set())
             if str(item).strip()
         }
+        entries_by_qq, inverted_index, prefix_index, cache_hit = self._get_related_memory_cache()
+        matched_candidates = self._extract_matching_candidates(normalized_text, prefix_index)
+        if not matched_candidates:
+            logger.debug(
+                "[astrbot_all_char][memory] 相关人物检索: cache_hit=%s, text_len=%s, matched_candidates=0",
+                cache_hit,
+                len(normalized_text),
+            )
+            return []
+
+        score_by_qq: dict[str, int] = {}
+        for candidate in matched_candidates:
+            for qq_id, score in inverted_index.get(candidate, []):
+                if qq_id in excluded:
+                    continue
+                old_score = score_by_qq.get(qq_id, 0)
+                if score > old_score:
+                    score_by_qq[qq_id] = score
+
         matched: list[tuple[int, dict[str, Any]]] = []
-
-        for entry in self.list_memories():
-            qq_id = str(entry.get("qq_id") or "").strip()
-            if not qq_id or qq_id in excluded:
-                continue
-
-            best_score = 0
-            for candidate, weight in self._entry_match_candidates(qq_id, entry):
-                normalized_candidate = self._normalize_alias(candidate)
-                if normalized_candidate and normalized_candidate in normalized_text:
-                    best_score = max(
-                        best_score,
-                        weight + min(len(normalized_candidate), 12),
-                    )
-
-            if best_score <= 0:
-                continue
-
-            matched.append((best_score, entry))
-
+        for qq_id, score in score_by_qq.items():
+            entry = entries_by_qq.get(qq_id)
+            if entry:
+                matched.append((score, entry))
         matched.sort(
             key=lambda pair: (
                 -pair[0],
@@ -1010,7 +1220,18 @@ class UserMemoryStore:
                 pair[1].get("qq_id", ""),
             )
         )
-        return [item for _, item in matched[:limit]]
+        result = [item for _, item in matched[:limit]]
+        logger.debug(
+            (
+                "[astrbot_all_char][memory] 相关人物检索: cache_hit=%s, text_len=%s, "
+                "matched_candidates=%s, matched_users=%s"
+            ),
+            cache_hit,
+            len(normalized_text),
+            len(matched_candidates),
+            len(result),
+        )
+        return result
 
     def build_related_memories_prompt(
         self,
@@ -1122,6 +1343,16 @@ def init_user_memory_store() -> UserMemoryStore:
     if _memory_store is None:
         _memory_store = UserMemoryStore()
     return _memory_store
+
+
+def configure_memory_observe_user_throttle_seconds(raw_value: Any) -> int:
+    store = init_user_memory_store()
+    return store.set_observe_user_throttle_seconds(raw_value)
+
+
+def configure_related_memory_cache_ttl_seconds(raw_value: Any) -> int:
+    store = init_user_memory_store()
+    return store.set_related_memory_cache_ttl_seconds(raw_value)
 
 
 def _memory_permission_denied_text() -> str:

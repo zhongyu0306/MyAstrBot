@@ -24,7 +24,9 @@ DEFAULT_HEADERS = {
     "Accept": "application/json, text/javascript, */*; q=0.01",
 }
 DATE_PATTERN = re.compile(r"^\d{4}-\d{1,2}-\d{1,2}$")
-RELATIVE_DATE_OFFSETS = {"今天": 0, "明天": 1, "后天": 2}
+DATE_CN_PATTERN = re.compile(r"^(?:(\d{4})年)?(\d{1,2})月(\d{1,2})(?:日|号)?$")
+DATE_MD_PATTERN = re.compile(r"^(\d{1,2})[./-](\d{1,2})$")
+RELATIVE_DATE_OFFSETS = {"今天": 0, "明天": 1, "后天": 2, "大后天": 3}
 SEAT_INDEXES = (
     ("商务座", 32),
     ("特等座", 25),
@@ -375,22 +377,92 @@ def _normalize_station_candidates(name: str) -> list[str]:
     return candidates
 
 
+def _strip_date_expr(date_expr: str) -> str:
+    return re.sub(r"\s+", "", (date_expr or "").strip().strip("，,。；;"))
+
+
+def _normalize_month_day(month: int, day: int, now: datetime) -> datetime:
+    # 从当前年往后找最近一个合法且不早于今天的日期，兼容 2月29日 这类跨闰年场景
+    for year in range(now.year, now.year + 8):
+        try:
+            parsed = datetime(year, month, day)
+        except ValueError:
+            continue
+        if parsed.date() >= now.date():
+            return parsed
+    raise ValueError("日期格式不正确，请使用有效日期。")
+
+
+def _looks_like_date_expr(date_expr: str | None) -> bool:
+    cleaned = _strip_date_expr(date_expr or "")
+    if not cleaned:
+        return False
+    if cleaned in RELATIVE_DATE_OFFSETS:
+        return True
+    return bool(
+        DATE_PATTERN.fullmatch(cleaned)
+        or DATE_CN_PATTERN.fullmatch(cleaned)
+        or DATE_MD_PATTERN.fullmatch(cleaned)
+    )
+
+
 def _normalize_date_expr(date_expr: str | None) -> str:
     if not date_expr:
         return datetime.now().strftime("%Y-%m-%d")
 
-    cleaned = date_expr.strip()
+    cleaned = _strip_date_expr(date_expr)
+    now = datetime.now()
     if cleaned in RELATIVE_DATE_OFFSETS:
-        return (datetime.now() + timedelta(days=RELATIVE_DATE_OFFSETS[cleaned])).strftime("%Y-%m-%d")
+        return (now + timedelta(days=RELATIVE_DATE_OFFSETS[cleaned])).strftime("%Y-%m-%d")
 
-    if not DATE_PATTERN.fullmatch(cleaned):
-        raise ValueError("日期仅支持 `YYYY-MM-DD`、`今天`、`明天`、`后天`。")
+    if DATE_PATTERN.fullmatch(cleaned):
+        try:
+            parsed = datetime.strptime(cleaned, "%Y-%m-%d")
+        except ValueError as exc:
+            raise ValueError("日期格式不正确，请使用有效日期。") from exc
+        return parsed.strftime("%Y-%m-%d")
 
+    matched_cn = DATE_CN_PATTERN.fullmatch(cleaned)
+    if matched_cn:
+        year_text, month_text, day_text = matched_cn.groups()
+        try:
+            month, day = int(month_text), int(day_text)
+            if year_text:
+                parsed = datetime(int(year_text), month, day)
+            else:
+                parsed = _normalize_month_day(month, day, now)
+        except ValueError as exc:
+            raise ValueError("日期格式不正确，请使用有效日期。") from exc
+        return parsed.strftime("%Y-%m-%d")
+
+    matched_md = DATE_MD_PATTERN.fullmatch(cleaned)
+    if matched_md:
+        try:
+            month, day = int(matched_md.group(1)), int(matched_md.group(2))
+            parsed = _normalize_month_day(month, day, now)
+        except ValueError as exc:
+            raise ValueError("日期格式不正确，请使用有效日期。") from exc
+        return parsed.strftime("%Y-%m-%d")
+
+    raise ValueError("日期仅支持 `YYYY-MM-DD`、`YYYY年M月D日`、`M月D日/号`、`今天`、`明天`、`后天`、`大后天`。")
+
+
+def _normalize_date_token_for_guessing(date_expr: str | None) -> str:
+    return _strip_date_expr(date_expr or "")
+
+
+def _parse_date_first_command(msg_parts: list[str]) -> tuple[str, str, str] | None:
+    if len(msg_parts) < 4:
+        return None
+    date_token = _normalize_date_token_for_guessing(msg_parts[1])
+    if not _looks_like_date_expr(date_token):
+        return None
     try:
-        parsed = datetime.strptime(cleaned, "%Y-%m-%d")
+        travel_date = _normalize_date_expr(date_token)
     except ValueError as exc:
-        raise ValueError("日期格式不正确，请使用 `YYYY-MM-DD`。") from exc
-    return parsed.strftime("%Y-%m-%d")
+        raise ValueError(str(exc)) from exc
+    departure, arrival = msg_parts[2].strip(), msg_parts[3].strip()
+    return departure, arrival, travel_date
 
 
 async def _load_station_codes(session: aiohttp.ClientSession, base_url: str) -> dict[str, str]:
@@ -569,10 +641,9 @@ def _parse_command_args(message: str) -> tuple[str, str, str]:
             "示例：/火车票 明天 厦门 上海"
         )
 
-    if len(msg_parts) >= 4 and (msg_parts[1] in RELATIVE_DATE_OFFSETS or DATE_PATTERN.fullmatch(msg_parts[1])):
-        travel_date = _normalize_date_expr(msg_parts[1])
-        departure, arrival = msg_parts[2].strip(), msg_parts[3].strip()
-        return departure, arrival, travel_date
+    parsed_date_first = _parse_date_first_command(msg_parts)
+    if parsed_date_first is not None:
+        return parsed_date_first
 
     departure, arrival = msg_parts[1].strip(), msg_parts[2].strip()
     travel_date = _normalize_date_expr(msg_parts[3]) if len(msg_parts) >= 4 else _normalize_date_expr(None)
@@ -644,7 +715,7 @@ async def handle_train_help(event: AstrMessageEvent):
         "• 示例：/火车票 厦门 上海 明天\n"
         "• 示例：/火车票 2026-04-02 厦门 上海\n\n"
         "说明：\n"
-        "- 日期支持 `YYYY-MM-DD`、`今天`、`明天`、`后天`，省略时默认查今天；\n"
+        "- 日期支持 `YYYY-MM-DD`、`YYYY年M月D日`、`M月D日/号`、`今天`、`明天`、`后天`、`大后天`，省略时默认查今天；\n"
         "- 当前 `astrbot_all_char` 版本仅实现命令查询，不启用自然语言识别；\n"
         "- 返回格式可通过配置 `train_default_format` 设置为 text/image。"
     )

@@ -309,6 +309,40 @@
         "type": "bool",
         "hint": "开启后会按当前消息与被动事件记忆的相关性，自动注入事件回忆提示。",
         "default": true
+      },
+      "memory_reminiscence_enabled": {
+        "description": "启用人物联动回忆注入",
+        "type": "bool",
+        "hint": "开启后在消息包含回忆线索或提到已识别人物时，才触发本地回忆联动。",
+        "default": true
+      },
+      "memory_reminiscence_min_message_length": {
+        "description": "联动回忆最小触发消息长度",
+        "type": "int",
+        "hint": "消息长度低于该值时，不触发人物联动回忆。建议 6-20。",
+        "slider": { "min": 1, "max": 200, "step": 1 },
+        "default": 8
+      },
+      "memory_observe_user_throttle_seconds": {
+        "description": "用户识别写库节流秒数",
+        "type": "int",
+        "hint": "同一用户在节流窗口内不重复写入 user 表；昵称变化会立即写入。0 表示关闭节流。",
+        "slider": { "min": 0, "max": 3600, "step": 1 },
+        "default": 120
+      },
+      "memory_related_memory_cache_ttl_seconds": {
+        "description": "相关人物检索缓存有效期（秒）",
+        "type": "int",
+        "hint": "用于缓存相关人物检索索引。数值越大数据库压力越小；0 表示每次都重建索引。",
+        "slider": { "min": 0, "max": 3600, "step": 1 },
+        "default": 60
+      },
+      "memory_prompt_max_chars": {
+        "description": "记忆注入最大字符预算",
+        "type": "int",
+        "hint": "用于限制 on_llm_request 追加到 system_prompt 的记忆内容上限，避免提示词过长。",
+        "slider": { "min": 400, "max": 12000, "step": 50 },
+        "default": 1800
       }
     }
   },
