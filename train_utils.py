@@ -40,6 +40,11 @@ SEAT_INDEXES = (
     ("无座", 26),
 )
 
+DEFAULT_TRAIN_IMAGE_MAX_RESULTS = 24
+DEFAULT_TRAIN_IMAGE_PAGE_SIZE = 18
+SAFE_IMAGE_ONLY_MAX_RESULTS = 18
+MAX_TRAIN_IMAGE_RESULTS = 200
+
 _station_code_cache: dict[str, str] | None = None
 _station_cache_lock = asyncio.Lock()
 
@@ -154,8 +159,13 @@ def _draw_rounded_rectangle(draw: ImageDraw.ImageDraw, box: tuple[int, int, int,
     draw.rounded_rectangle(box, radius=radius, fill=fill, outline=outline)
 
 
-def _draw_train_images(api_data: dict) -> list[str]:
-    data_list = api_data.get("data") or []
+def _draw_train_images(
+    api_data: dict,
+    *,
+    page_size: int = DEFAULT_TRAIN_IMAGE_PAGE_SIZE,
+    total_count: int | None = None,
+) -> list[str]:
+    data_list = list(api_data.get("data") or [])
     go = api_data.get("go", "")
     to = api_data.get("to", "")
     date = api_data.get("date", "")
@@ -170,7 +180,7 @@ def _draw_train_images(api_data: dict) -> list[str]:
     body_font = _get_chinese_font(17)
     small_font = _get_chinese_font(14)
     if not all((title_font, subtitle_font, section_font, badge_font, body_font, small_font)):
-        logger.warning("未找到中文字体，图片模式将退回文本")
+        logger.warning("train image mode fallback to text: missing CJK font")
         return []
 
     try:
@@ -182,9 +192,15 @@ def _draw_train_images(api_data: dict) -> list[str]:
         columns = 2
         card_gap = 18
         card_width = (width - margin * 2 - column_gap) // columns
+        content_inner_width = card_width - 52
         temp_img = Image.new("RGB", (width, 400), (245, 240, 232))
         temp_draw = ImageDraw.Draw(temp_img)
         file_paths: list[str] = []
+
+        page_size = max(1, int(page_size or DEFAULT_TRAIN_IMAGE_PAGE_SIZE))
+        shown_total = len(data_list)
+        overall_total = total_count if isinstance(total_count, int) and total_count >= shown_total else shown_total
+        page_total = (shown_total + page_size - 1) // page_size
 
         def build_chip_rows(
             seat_texts: list[str], max_width: int
@@ -215,132 +231,145 @@ def _draw_train_images(api_data: dict) -> list[str]:
                 rows.append(current_row)
 
             if not rows:
-                fill_color, text_color = _seat_palette("暂无席位信息")
-                text_width, text_height = _text_size(temp_draw, "暂无席位信息", small_font)
-                rows = [[("暂无席位信息", fill_color, text_color, text_width + 28, text_height + 14)]]
+                fallback_text = "No seat info"
+                fill_color, text_color = _seat_palette(fallback_text)
+                text_width, text_height = _text_size(temp_draw, fallback_text, small_font)
+                rows = [[(fallback_text, fill_color, text_color, text_width + 28, text_height + 14)]]
 
             rows = rows[:3]
             total_height = sum(max(chip[4] for chip in row) for row in rows) + row_gap * max(0, len(rows) - 1)
             return rows, total_height
 
-        layouts: list[tuple[dict, int, list[list[tuple[str, tuple[int, int, int], tuple[int, int, int], int, int]]]]] = []
-        content_inner_width = card_width - 52
-        for item in data_list:
-            seats = item.get("SeatList") or []
-            seat_texts = [_format_seat_text(seat) for seat in seats if _format_seat_text(seat)]
-            chip_rows, chip_height = build_chip_rows(seat_texts, content_inner_width)
-            card_height = 156 + chip_height
-            layouts.append((item, card_height, chip_rows))
+        for page_index in range(page_total):
+            start = page_index * page_size
+            page_data = data_list[start : start + page_size]
 
-        row_heights: list[int] = []
-        for index in range(0, len(layouts), columns):
-            row_items = layouts[index : index + columns]
-            row_heights.append(max(item[1] for item in row_items))
+            layouts: list[tuple[dict, int, list[list[tuple[str, tuple[int, int, int], tuple[int, int, int], int, int]]]]] = []
+            for item in page_data:
+                seats = item.get("SeatList") or []
+                seat_texts = [_format_seat_text(seat) for seat in seats if _format_seat_text(seat)]
+                chip_rows, chip_height = build_chip_rows(seat_texts, content_inner_width)
+                card_height = 156 + chip_height
+                layouts.append((item, card_height, chip_rows))
 
-        body_height = sum(row_heights) + card_gap * max(0, len(row_heights) - 1)
-        height = header_height + body_height + footer_height + margin
-        img = Image.new("RGB", (width, height), (245, 240, 232))
-        draw = ImageDraw.Draw(img)
+            if not layouts:
+                continue
 
-        draw.rectangle((0, 0, width, height), fill=(245, 240, 232))
-        draw.rectangle((0, 0, width, 130), fill=(28, 63, 121))
-        draw.rectangle((0, 98, width, 176), fill=(45, 87, 158))
-        draw.ellipse((width - 300, -100, width + 120, 210), fill=(66, 112, 191))
-        draw.ellipse((-120, 54, 220, 230), fill=(231, 220, 193))
+            row_heights: list[int] = []
+            for index in range(0, len(layouts), columns):
+                row_items = layouts[index : index + columns]
+                row_heights.append(max(item[1] for item in row_items))
 
-        draw.text((margin, 28), f"{go} → {to}", fill=(255, 255, 255), font=title_font)
-        draw.text(
-            (margin, 86),
-            f"出行日期：{date}    更新时间：{time_str or '实时查询'}",
-            fill=(230, 238, 255),
-            font=subtitle_font,
-        )
+            body_height = sum(row_heights) + card_gap * max(0, len(row_heights) - 1)
+            height = header_height + body_height + footer_height + margin
+            img = Image.new("RGB", (width, height), (245, 240, 232))
+            draw = ImageDraw.Draw(img)
 
-        count_badge = f"共 {len(data_list)} 趟车次"
-        badge_w, badge_h = _text_size(draw, count_badge, subtitle_font)
-        badge_box = (width - margin - badge_w - 40, 30, width - margin, 30 + badge_h + 20)
-        _draw_rounded_rectangle(draw, badge_box, fill=(239, 244, 255), radius=16)
-        draw.text((badge_box[0] + 18, badge_box[1] + 9), count_badge, fill=(33, 76, 147), font=subtitle_font)
+            draw.rectangle((0, 0, width, height), fill=(245, 240, 232))
+            draw.rectangle((0, 0, width, 130), fill=(28, 63, 121))
+            draw.rectangle((0, 98, width, 176), fill=(45, 87, 158))
+            draw.ellipse((width - 300, -100, width + 120, 210), fill=(66, 112, 191))
+            draw.ellipse((-120, 54, 220, 230), fill=(231, 220, 193))
 
-        y = header_height
-        layout_index = 0
-        for row_height in row_heights:
-            for col in range(columns):
-                if layout_index >= len(layouts):
-                    break
-                item, card_height, chip_rows = layouts[layout_index]
-                left = margin + col * (card_width + column_gap)
-                right = left + card_width
-                top = y
-                bottom = y + card_height
+            draw.text((margin, 28), f"{go} -> {to}", fill=(255, 255, 255), font=title_font)
+            draw.text(
+                (margin, 86),
+                f"Date: {date}    Updated: {time_str or 'Realtime'}",
+                fill=(230, 238, 255),
+                font=subtitle_font,
+            )
 
-                _draw_rounded_rectangle(
-                    draw,
-                    (left + 4, top + 6, right + 4, bottom + 6),
-                    fill=(229, 223, 211),
-                    radius=24,
-                )
-                _draw_rounded_rectangle(
-                    draw,
-                    (left, top, right, bottom),
-                    fill=(255, 252, 247),
-                    outline=(226, 221, 213),
-                    radius=24,
-                )
-                draw.rounded_rectangle((left, top, left + 10, bottom), radius=12, fill=(201, 147, 68))
+            shown_end = min(start + len(page_data), shown_total)
+            count_badge = f"{start + 1}-{shown_end}/{overall_total} trains"
+            badge_w, badge_h = _text_size(draw, count_badge, subtitle_font)
+            badge_box = (width - margin - badge_w - 40, 30, width - margin, 30 + badge_h + 20)
+            _draw_rounded_rectangle(draw, badge_box, fill=(239, 244, 255), radius=16)
+            draw.text((badge_box[0] + 18, badge_box[1] + 9), count_badge, fill=(33, 76, 147), font=subtitle_font)
 
-                badge_box = (left + 20, top + 18, left + 138, top + 60)
-                _draw_rounded_rectangle(draw, badge_box, fill=(224, 235, 255), radius=14)
-                draw.text((badge_box[0] + 16, badge_box[1] + 9), item.get("TrainNumber", ""), fill=(41, 88, 174), font=badge_font)
+            y = header_height
+            layout_index = 0
+            for row_height in row_heights:
+                for col in range(columns):
+                    if layout_index >= len(layouts):
+                        break
+                    item, card_height, chip_rows = layouts[layout_index]
+                    left = margin + col * (card_width + column_gap)
+                    right = left + card_width
+                    top = y
+                    bottom = y + card_height
 
-                draw.text(
-                    (left + 160, top + 22),
-                    f"{item.get('start', '')} → {item.get('end', '')}",
-                    fill=(35, 39, 46),
-                    font=body_font,
-                )
+                    _draw_rounded_rectangle(
+                        draw,
+                        (left + 4, top + 6, right + 4, bottom + 6),
+                        fill=(229, 223, 211),
+                        radius=24,
+                    )
+                    _draw_rounded_rectangle(
+                        draw,
+                        (left, top, right, bottom),
+                        fill=(255, 252, 247),
+                        outline=(226, 221, 213),
+                        radius=24,
+                    )
+                    draw.rounded_rectangle((left, top, left + 10, bottom), radius=12, fill=(201, 147, 68))
 
-                metric_y = top + 78
-                metric_block_width = 158
-                metrics = [
-                    ("出发", item.get("DepartTime", "")),
-                    ("到达", item.get("ArriveTime", "")),
-                    ("历时", item.get("TimeDifference", "")),
-                ]
-                for idx, (label, value) in enumerate(metrics):
-                    metric_x = left + 22 + idx * metric_block_width
-                    draw.text((metric_x, metric_y), label, fill=(131, 119, 104), font=small_font)
-                    draw.text((metric_x, metric_y + 24), str(value), fill=(45, 49, 56), font=body_font)
+                    chip_box = (left + 20, top + 18, left + 138, top + 60)
+                    _draw_rounded_rectangle(draw, chip_box, fill=(224, 235, 255), radius=14)
+                    draw.text((chip_box[0] + 16, chip_box[1] + 9), item.get("TrainNumber", ""), fill=(41, 88, 174), font=badge_font)
 
-                draw.text((left + 22, top + 126), "席位与余票", fill=(121, 108, 95), font=section_font)
-                chip_y = top + 154
-                chip_gap = 10
-                row_gap = 10
-                for row in chip_rows:
-                    chip_x = left + 22
-                    row_height_actual = 0
-                    for seat_text, fill_color, text_color, chip_width, chip_height in row:
-                        box = (chip_x, chip_y, chip_x + chip_width, chip_y + chip_height)
-                        _draw_rounded_rectangle(draw, box, fill=fill_color, radius=12)
-                        draw.text((box[0] + 13, box[1] + 6), seat_text, fill=text_color, font=small_font)
-                        chip_x += chip_width + chip_gap
-                        row_height_actual = max(row_height_actual, chip_height)
-                    chip_y += row_height_actual + row_gap
+                    draw.text(
+                        (left + 160, top + 22),
+                        f"{item.get('start', '')} -> {item.get('end', '')}",
+                        fill=(35, 39, 46),
+                        font=body_font,
+                    )
 
-                layout_index += 1
+                    metric_y = top + 78
+                    metric_block_width = 158
+                    metrics = [
+                        ("Depart", item.get("DepartTime", "")),
+                        ("Arrive", item.get("ArriveTime", "")),
+                        ("Duration", item.get("TimeDifference", "")),
+                    ]
+                    for idx, (label, value) in enumerate(metrics):
+                        metric_x = left + 22 + idx * metric_block_width
+                        draw.text((metric_x, metric_y), label, fill=(131, 119, 104), font=small_font)
+                        draw.text((metric_x, metric_y + 24), str(value), fill=(45, 49, 56), font=body_font)
 
-            y += row_height + card_gap
+                    draw.text((left + 22, top + 126), "Seats & Availability", fill=(121, 108, 95), font=section_font)
+                    chip_y = top + 154
+                    chip_gap = 10
+                    row_gap = 10
+                    for row in chip_rows:
+                        chip_x = left + 22
+                        row_height_actual = 0
+                        for seat_text, fill_color, text_color, chip_width, chip_height in row:
+                            box = (chip_x, chip_y, chip_x + chip_width, chip_y + chip_height)
+                            _draw_rounded_rectangle(draw, box, fill=fill_color, radius=12)
+                            draw.text((box[0] + 13, box[1] + 6), seat_text, fill=text_color, font=small_font)
+                            chip_x += chip_width + chip_gap
+                            row_height_actual = max(row_height_actual, chip_height)
+                        chip_y += row_height_actual + row_gap
 
-        footer_text = "官方 12306 实时查询结果"
-        draw.text((margin, height - footer_height), footer_text, fill=(113, 104, 95), font=section_font)
+                    layout_index += 1
 
-        fp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-        img.save(fp.name)
-        file_paths.append(fp.name)
+                y += row_height + card_gap
+
+            footer_parts = ["Official 12306 query result"]
+            if shown_total < overall_total:
+                footer_parts.append(f"Showing first {shown_total}")
+            if page_total > 1:
+                footer_parts.append(f"Page {page_index + 1}/{page_total}")
+            draw.text((margin, height - footer_height), " | ".join(footer_parts), fill=(113, 104, 95), font=section_font)
+
+            fp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+            fp.close()
+            img.save(fp.name, format="PNG", optimize=True, compress_level=6)
+            file_paths.append(fp.name)
 
         return file_paths
     except Exception as e:
-        logger.error("生成火车票图片失败: %s", e)
+        logger.error("failed to draw train ticket image: %s", e)
         return []
 
 
@@ -650,6 +679,18 @@ def _parse_command_args(message: str) -> tuple[str, str, str]:
     return departure, arrival, travel_date
 
 
+def _to_bounded_int(value: object, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except Exception:
+        parsed = default
+    if parsed < minimum:
+        return minimum
+    if parsed > maximum:
+        return maximum
+    return parsed
+
+
 async def _do_query(
     api_url: str,
     default_format: str,
@@ -657,27 +698,54 @@ async def _do_query(
     arrival: str,
     travel_date: str,
     event: AstrMessageEvent,
+    image_only: bool = False,
+    image_max_results: int = DEFAULT_TRAIN_IMAGE_MAX_RESULTS,
+    image_page_size: int = DEFAULT_TRAIN_IMAGE_PAGE_SIZE,
 ):
     image_paths: list[str] = []
     try:
         try:
             api_data = await _fetch_trains(api_url, departure, arrival, travel_date)
         except ValueError as exc:
-            yield event.plain_result(f"❌ {exc}")
+            yield event.plain_result(f"❌{exc}")
             return
 
         if api_data is None:
-            yield event.plain_result("❌ 查询失败或无数据，请检查出发地/目的地或稍后重试。")
+            yield event.plain_result("❌查询失败或无数据，请检查出发地/目的地或稍后重试。")
             return
+
         fmt = str(default_format).lower()
         if fmt == "image":
-            image_paths = _draw_train_images(api_data)
+            rows = list(api_data.get("data") or [])
+            total_rows = len(rows)
+            shown_rows = rows
+            if image_max_results > 0 and total_rows > image_max_results:
+                shown_rows = rows[:image_max_results]
+                logger.info(
+                    "train image rows clipped: departure=%s, arrival=%s, total=%s, shown=%s",
+                    departure,
+                    arrival,
+                    total_rows,
+                    len(shown_rows),
+                )
+
+            draw_data = dict(api_data)
+            draw_data["data"] = shown_rows
+            image_paths = _draw_train_images(
+                draw_data,
+                page_size=image_page_size,
+                total_count=total_rows,
+            )
+
             if image_paths:
                 for image_path in image_paths:
                     yield event.image_result(image_path)
             else:
-                text = _format_train_text(api_data)
-                yield event.plain_result(f"🚆 火车票查询\n\n{text}")
+                if image_only:
+                    yield event.plain_result("❌车票图片生成失败，请稍后重试。")
+                else:
+                    text = _format_train_text(api_data)
+                    yield event.plain_result(f"🚆 火车票查询\n\n{text}")
         else:
             text = _format_train_text(api_data)
             yield event.plain_result(f"🚆 火车票查询\n\n{text}")
@@ -687,6 +755,64 @@ async def _do_query(
                 os.unlink(image_path)
             except Exception:
                 pass
+
+
+async def handle_train_query(
+    event: AstrMessageEvent,
+    config: AstrBotConfig,
+    departure: str,
+    arrival: str,
+    travel_date: str | None = None,
+    *,
+    format_override: str | None = None,
+    image_only: bool = False,
+):
+    dep = str(departure or "").strip()
+    arr = str(arrival or "").strip()
+    if not dep or not arr:
+        yield event.plain_result("❌请同时提供出发地和目的地。")
+        return
+
+    try:
+        normalized_date = _normalize_date_expr(travel_date)
+    except ValueError as exc:
+        yield event.plain_result(f"❌{exc}")
+        return
+
+    api_url = (getattr(config, "train_api_url", None) or OFFICIAL_12306_BASE_URL).rstrip("/")
+    default_format = str(format_override or getattr(config, "train_default_format", "text") or "text").strip().lower()
+
+    image_max_results = _to_bounded_int(
+        getattr(config, "train_image_max_results", DEFAULT_TRAIN_IMAGE_MAX_RESULTS),
+        DEFAULT_TRAIN_IMAGE_MAX_RESULTS,
+        6,
+        MAX_TRAIN_IMAGE_RESULTS,
+    )
+    image_page_size = _to_bounded_int(
+        getattr(config, "train_image_page_size", DEFAULT_TRAIN_IMAGE_PAGE_SIZE),
+        DEFAULT_TRAIN_IMAGE_PAGE_SIZE,
+        4,
+        50,
+    )
+
+    if image_only:
+        default_format = "image"
+        image_max_results = min(image_max_results, SAFE_IMAGE_ONLY_MAX_RESULTS)
+
+    image_page_size = min(image_page_size, max(1, image_max_results))
+
+    async for r in _do_query(
+        api_url,
+        default_format,
+        dep,
+        arr,
+        normalized_date,
+        event,
+        image_only=image_only,
+        image_max_results=image_max_results,
+        image_page_size=image_page_size,
+    ):
+        yield r
 
 
 async def handle_train_command(event: AstrMessageEvent, config: AstrBotConfig):
@@ -699,9 +825,13 @@ async def handle_train_command(event: AstrMessageEvent, config: AstrBotConfig):
         yield event.plain_result(f"❌ {exc}\n\n（当前整合版仅支持命令模式）")
         return
 
-    api_url = (getattr(config, "train_api_url", None) or OFFICIAL_12306_BASE_URL).rstrip("/")
-    default_format = getattr(config, "train_default_format", "text")
-    async for r in _do_query(api_url, default_format, departure, arrival, travel_date, event):
+    async for r in handle_train_query(
+        event,
+        config,
+        departure,
+        arrival,
+        travel_date,
+    ):
         yield r
 
 

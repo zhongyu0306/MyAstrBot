@@ -9,6 +9,7 @@ _MODULE_KEYS = (
     "fund",
     "weather",
     "memory",
+    "proactive",
     "epic",
     "jrys",
     "ocr",

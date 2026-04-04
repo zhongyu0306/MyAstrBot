@@ -10,7 +10,7 @@ from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.tool import FunctionTool, ToolExecResult
 from astrbot.core.astr_agent_context import AstrAgentContext
 
-from .train_utils import _fetch_trains, _format_train_text, handle_train_command, handle_train_help
+from .train_utils import _fetch_trains, _format_train_text, handle_train_command, handle_train_help, handle_train_query
 from .sy_scheduler_utils import (
     _parse_time_expression,
     handle_sy_rmd_group,
@@ -25,7 +25,13 @@ from .stock_utils import (
     handle_stock_command,
 )
 from .fund_analysis_utils import handle_fund_command
-from .weather_utils import _get_weather_config, _query_weather_text, handle_weather_command, handle_weather_help
+from .weather_utils import (
+    _query_weather_text,
+    _resolve_weather_query,
+    get_weather_runtime_config,
+    handle_weather_command,
+    handle_weather_help,
+)
 from .bookkeeping_utils import (
     init_bookkeeping_module,
     handle_bookkeeping_expense,
@@ -87,6 +93,13 @@ from .memory_utils import (
 )
 from .passive_memory_utils import init_passive_memory_store
 from .memory_panel_utils import handle_memory_panel_command, maybe_autostart_memory_panel
+from .proactive_message_utils import (
+    configure_proactive_admin_qq_ids,
+    handle_proactive_message_command,
+    init_proactive_message_center,
+    is_proactive_admin_event,
+    send_message_to_target,
+)
 
 
 def _get_effective_config(ctx: Context, plugin_config: AstrBotConfig | None) -> AstrBotConfig | dict:
@@ -255,6 +268,8 @@ class AllCharPlugin(Star):
         # 初始化用户永久记忆存储
         init_user_memory_store()
         configure_memory_admin_qq_ids(getattr(self.config, "memory_admin_qq_ids", None))
+        configure_proactive_admin_qq_ids(getattr(self.config, "proactive_admin_qq_ids", None))
+        init_proactive_message_center(self.context, self.config)
         configure_memory_observe_user_throttle_seconds(
             getattr(self.config, "memory_observe_user_throttle_seconds", 120)
         )
@@ -269,7 +284,6 @@ class AllCharPlugin(Star):
             self.context.add_llm_tools(
                 StockQueryTool(),
                 WeatherQueryTool(),
-                TrainQueryTool(),
                 SimpleReminderTool(),
                 BookkeepingAddExpenseTool(),
                 BookkeepingAddIncomeTool(),
@@ -279,9 +293,10 @@ class AllCharPlugin(Star):
                 AnimeTraceTool(),
                 MusicPlayTool(),
                 SendEmailTool(),
+                ProactiveSendMessageTool(),
             )
             logger.info(
-                "astrbot_all_char 已注册 LLM 工具：股票、天气、火车票、提醒、记账、智能搜索/网页搜索、动漫识别、点歌、发邮件等"
+                "astrbot_all_char 已注册 LLM 工具：股票、天气、火车票、提醒、记账、智能搜索/网页搜索、动漫识别、点歌、发邮件、主动消息等"
             )
         except Exception as e:
             logger.error("astrbot_all_char 注册 LLM 工具失败: %s", e)
@@ -339,6 +354,11 @@ class AllCharPlugin(Star):
         """
         wrapped = _CmdWrappedEvent(event, "/提醒 列表")
         async for result in handle_simple_reminder(wrapped, self.context, self.config):
+            yield result
+
+    @filter.command("主动消息", alias={"主动发送", "主动推送"})
+    async def cmd_proactive_message(self, event: AstrMessageEvent):
+        async for result in handle_proactive_message_command(event, self.context, self.config):
             yield result
 
     # ---------------- 用户永久记忆 ----------------
@@ -660,29 +680,39 @@ class AllCharPlugin(Star):
             yield result
 
     @filter.llm_tool(name="weather_query")
-    async def tool_weather_query(self, event: AstrMessageEvent, city: str, days: str | None = None):
+    async def tool_weather_query(
+        self,
+        event: AstrMessageEvent,
+        city: str,
+        days: str | None = None,
+        when: str | None = None,
+    ):
         """查询城市天气。
 
         Args:
             city(string): 城市名称，例如 北京。
             days(number): 预报天数（1-7，可选）。
+            when(string): 自然语言时间，例如 今天、明天、后天、周一、下周三、未来5天。
         """
         logger.info(
-            "[astrbot_all_char][LLMTool] 天气查询工具被调用，参数 city=%s, days=%s",
+            "[astrbot_all_char][LLMTool] 天气查询工具被调用，参数 city=%s, days=%s, when=%s",
             city,
             days,
+            when,
         )
         day_int: int | None = None
         if days:
             try:
-                d = int(str(days))
-                if d >= 2:
+                d = int(str(days).strip())
+                if 1 <= d <= 7:
                     day_int = d
             except ValueError:
                 day_int = None
 
         parts = ["/天气", city]
-        if day_int is not None:
+        if when and str(when).strip():
+            parts.append(str(when).strip())
+        elif day_int is not None:
             parts.append(str(day_int))
         fake = " ".join(parts)
         wrapped = _CmdWrappedEvent(event, fake)
@@ -702,6 +732,7 @@ class AllCharPlugin(Star):
         使用建议（给 LLM 的决策规则）：
         - 用户询问两地之间的火车/车次/高铁/动车：优先调用本工具；
         - 若用户已明确出发地、目的地和日期（如“帮我查一下4月20号厦门到上海的火车”），请同时填充 `departure/arrival/travel_date`；
+        - 该自然语言工具默认仅返回图片形式的车票结果；
         - 仅当用户只问“怎么坐火车”“高铁要多久”且没有具体城市时，再考虑纯聊天回答。
 
         Args:
@@ -722,12 +753,15 @@ class AllCharPlugin(Star):
             yield event.plain_result("请同时提供出发地和目的地，例如：departure=厦门, arrival=上海。")
             return
 
-        parts = ["/火车票", dep, arr]
-        if date_text:
-            parts.append(date_text)
-        fake = " ".join(parts)
-        wrapped = _CmdWrappedEvent(event, fake)
-        async for result in handle_train_command(wrapped, self.config):
+        async for result in handle_train_query(
+            event,
+            self.config,
+            dep,
+            arr,
+            date_text or None,
+            format_override="image",
+            image_only=True,
+        ):
             yield result
 
     @filter.llm_tool(name="simple_reminder")
@@ -1038,7 +1072,7 @@ class WeatherQueryTool(FunctionTool[AstrAgentContext]):
     """
 
     name: str = "weather_query"
-    description: str = "查询指定城市的天气情况，可选指定预报天数（1-7 天）。"
+    description: str = "查询指定城市天气，支持未来 1-7 天预报，也支持今天、明天、后天、周几等自然语言时间。"
     parameters: dict = Field(
         default_factory=lambda: {
             "type": "object",
@@ -1049,9 +1083,13 @@ class WeatherQueryTool(FunctionTool[AstrAgentContext]):
                 },
                 "days": {
                     "type": "integer",
-                    "description": "天气预报天数（1-7，可选）。",
+                    "description": "天气预报天数（1-7，可选）。和 when 二选一即可。",
                     "minimum": 1,
                     "maximum": 7,
+                },
+                "when": {
+                    "type": "string",
+                    "description": "自然语言时间（可选），例如 今天、明天、后天、周一、下周三、未来5天。",
                 },
             },
             "required": ["city"],
@@ -1063,6 +1101,7 @@ class WeatherQueryTool(FunctionTool[AstrAgentContext]):
         context: ContextWrapper[AstrAgentContext],
         city: str,
         days: int | None = None,
+        when: str | None = None,
         **kwargs,
     ) -> ToolExecResult:
         ctx = context.context.context
@@ -1072,27 +1111,45 @@ class WeatherQueryTool(FunctionTool[AstrAgentContext]):
         if not c:
             return "请提供要查询的城市名称，例如 北京。"
 
-        day_int: int | None = None
-        if days is not None:
-            try:
-                d = int(days)
-                if d >= 2:
-                    day_int = d
-            except Exception:
-                day_int = None
+        query_spec, error_message = _resolve_weather_query(c, days=days, when_text=when)
+        if not query_spec:
+            return error_message or "天气查询参数错误。"
 
-        _default_url = "https://api.nycnm.cn/API/weather.php"
-        api_url = _get_weather_config(cfg, "weather_api_url", _default_url) or _default_url
-        api_key = _get_weather_config(cfg, "weather_api_key", "")
+        resolved_city = str(query_spec["city"] or "").strip()
+        forecast_days = int(query_spec["forecast_days"] or 1)
+        target_day_offset = query_spec["target_day_offset"]
+        target_day_label = str(query_spec["target_day_label"] or "").strip() or None
 
-        text = await _query_weather_text(api_url, api_key, c, day_int)
+        weather_cfg = get_weather_runtime_config(cfg)
+        text = await _query_weather_text(
+            weather_cfg["api_url"],
+            resolved_city,
+            forecast_days,
+            geocoding_api_url=weather_cfg.get("geocoding_api_url"),
+            target_day_offset=target_day_offset if isinstance(target_day_offset, int) else None,
+            target_day_label=target_day_label,
+        )
         if not text:
+            provider = weather_cfg.get("provider", "weather")
+            if provider == "open-meteo":
+                return (
+                    "天气查询失败或无数据。\n"
+                    "当前默认使用 Open-Meteo；如果是重名城市，"
+                    "建议把城市写成“城市, 国家代码”，例如 `Paris, FR`。"
+                )
             return (
                 "天气查询失败或无数据。\n"
-                "若使用 api.nycnm.cn，请确认在插件配置「天气」中填写了「API 密钥（apikey）」。"
+                "若你接的是旧版自定义天气 API，请确认对应接口地址配置正确。"
             )
 
-        title = f"📍 {c}天气" if not day_int or day_int == 1 else f"📍 {c} {day_int}天天气预报"
+        if target_day_label:
+            title = f"📍 {resolved_city} {target_day_label}天气"
+        else:
+            title = (
+                f"📍 {resolved_city}天气"
+                if forecast_days <= 1
+                else f"📍 {resolved_city} 未来{forecast_days}天天气预报"
+            )
         return f"{title}\n\n{text}"
 
 
@@ -1751,5 +1808,64 @@ class SendEmailTool(FunctionTool[AstrAgentContext]):
             body=(body or "").strip() or "",
             smtp_host=get_email_config(cfg, "email_smtp_host", "smtp.qq.com"),
             smtp_port=int(get_email_config(cfg, "email_smtp_port", "465") or "465"),
+        )
+        return msg
+
+
+@dataclass
+class ProactiveSendMessageTool(FunctionTool[AstrAgentContext]):
+    """
+    向已绑定的群聊或私聊目标主动发送一条消息。
+    """
+
+    name: str = "proactive_send_message"
+    description: str = (
+        "向已绑定的群聊或私聊目标主动发送消息，仅管理员可用。"
+        "当同一个别名同时绑定了群聊和私聊时，请明确指定 scene_type=group 或 private。"
+    )
+    parameters: dict = Field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "target_alias": {
+                    "type": "string",
+                    "description": "目标别名，例如 工作群、老王私聊。",
+                },
+                "text": {
+                    "type": "string",
+                    "description": "要主动发送的纯文本内容。",
+                },
+                "scene_type": {
+                    "type": "string",
+                    "description": "可选：group、private、auto；默认 auto。",
+                    "enum": ["auto", "group", "private"],
+                },
+            },
+            "required": ["target_alias", "text"],
+        }
+    )
+
+    async def call(
+        self,
+        context: ContextWrapper[AstrAgentContext],
+        target_alias: str,
+        text: str,
+        scene_type: str | None = None,
+        **kwargs,
+    ) -> ToolExecResult:
+        del kwargs
+        event = context.context.event
+        if event is not None and not is_proactive_admin_event(event):
+            return "主动消息仅允许管理员使用。"
+
+        ctx = context.context.context
+        normalized_scene_type = str(scene_type or "").strip().lower()
+        if normalized_scene_type == "auto":
+            normalized_scene_type = ""
+        ok, msg = await send_message_to_target(
+            ctx,
+            alias=(target_alias or "").strip(),
+            text=(text or "").strip(),
+            scene_type=normalized_scene_type,
         )
         return msg

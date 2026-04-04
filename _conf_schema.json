@@ -237,28 +237,34 @@
     }
   },
   "weather": {
-    "description": "天气查询https://api.nycnm.cn/template/home/galaxy/index.php",
-    "hint": "天气查询 API 与返回格式配置。",
+    "description": "全球天气查询（默认 Open-Meteo）",
+    "hint": "默认使用 Open-Meteo，支持全球城市天气、1-7 天预报和今天/明天/周几等自然语言时间；保留旧版自定义 API 兼容入口。",
     "type": "object",
     "items": {
       "weather_api_url": {
-        "description": "天气查询 API 地址",
+        "description": "兼容旧版的自定义天气 API 地址",
         "type": "string",
-        "hint": "天气查询 API 的完整 URL 地址",
-        "default": "https://api.nycnm.cn/API/weather.php"
-      },
-      "weather_api_key": {
-        "description": "API 密钥（apikey）",
-        "type": "string",
-        "hint": "使用 api.nycnm.cn 时必填，否则接口返回空。在 API 在线调试页获取并粘贴到此处。",
+        "hint": "留空时自动使用 Open-Meteo；仅当你要接入旧版或自定义天气接口时再填写。",
         "default": ""
+      },
+      "weather_forecast_api_url": {
+        "description": "Open-Meteo 预报 API 地址",
+        "type": "string",
+        "hint": "默认即可，除非你需要自托管或商业保留端点。",
+        "default": "https://api.open-meteo.com/v1/forecast"
+      },
+      "weather_geocoding_api_url": {
+        "description": "Open-Meteo 地理编码 API 地址",
+        "type": "string",
+        "hint": "用于把城市名解析成经纬度，默认支持全球城市搜索。",
+        "default": "https://geocoding-api.open-meteo.com/v1/search"
       },
       "weather_default_format": {
         "description": "默认返回格式",
         "type": "string",
         "options": ["text", "image"],
-        "hint": "text=文本，image=图片",
-        "default": "image"
+        "hint": "默认推荐 text。Open-Meteo 返回文本；若你接的是旧版自定义图片天气 API，可切到 image。",
+        "default": "text"
       }
     }
   },
@@ -343,6 +349,124 @@
         "hint": "用于限制 on_llm_request 追加到 system_prompt 的记忆内容上限，避免提示词过长。",
         "slider": { "min": 400, "max": 12000, "step": 50 },
         "default": 1800
+      }
+    }
+  },
+  "proactive": {
+    "description": "主动消息发送",
+    "hint": "用于配置式主动消息：直接填写私聊 QQ 列表、群号列表和 24 小时时段规则，无需再用命令绑定目标。",
+    "type": "object",
+    "items": {
+      "proactive_enabled": {
+        "description": "启用配置式主动消息",
+        "type": "bool",
+        "hint": "开启后会按下方的 QQ 列表、群号列表和时段规则自动主动发消息。",
+        "default": false
+      },
+      "proactive_admin_qq_ids": {
+        "description": "主动消息管理员 QQ 列表",
+        "type": "list",
+        "hint": "只有这些管理员可以使用 `/主动消息` 与主动消息 LLM 工具；留空时会回退使用 `memory_admin_qq_ids`。配置式自动发送本身不依赖手动命令。",
+        "default": []
+      },
+      "proactive_private_qq_ids": {
+        "description": "主动私聊 QQ 列表",
+        "type": "list",
+        "hint": "配置 bot 需要主动私聊发送的 QQ 号列表，例如 123456789。",
+        "default": []
+      },
+      "proactive_group_ids": {
+        "description": "主动群聊群号列表",
+        "type": "list",
+        "hint": "配置 bot 需要主动群发消息的 QQ 群号列表。",
+        "default": []
+      },
+      "proactive_timezone": {
+        "description": "主动消息时区",
+        "type": "string",
+        "hint": "例如 Asia/Shanghai。时段规则会按这个时区执行。",
+        "default": "Asia/Shanghai"
+      },
+      "proactive_send_platform": {
+        "description": "主动消息发送平台",
+        "type": "string",
+        "options": ["aiocqhttp"],
+        "hint": "当前按 QQ 号 / 群号直发仅支持 aiocqhttp。",
+        "default": "aiocqhttp"
+      },
+      "proactive_llm_umo": {
+        "description": "主动消息生成用会话 ID",
+        "type": "string",
+        "hint": "仅在时段规则里填写了 prompt_template 时使用；留空则只发送固定文案 message_text。",
+        "default": ""
+      },
+      "proactive_time_slots": {
+        "description": "24 小时时段规则",
+        "type": "template_list",
+        "hint": "每条规则会在设定的开始小时到结束小时之间，于指定分钟触发一次；如果跨度覆盖多个小时，就会每个小时触发一次。",
+        "templates": {
+          "time_slot_rule": {
+            "name": "主动消息时段规则",
+            "items": {
+              "name": {
+                "type": "string",
+                "description": "规则名称",
+                "hint": "仅用于区分和查看日志，例如：早安问候、午间提醒。",
+                "default": "主动消息规则"
+              },
+              "enabled": {
+                "type": "bool",
+                "description": "启用该规则",
+                "default": true
+              },
+              "target_scope": {
+                "type": "string",
+                "description": "发送对象类型",
+                "options": ["both", "private", "group"],
+                "hint": "both=同时发给私聊 QQ 列表和群号列表；private=只发私聊；group=只发群。",
+                "default": "both"
+              },
+              "start_hour": {
+                "type": "int",
+                "description": "开始小时",
+                "hint": "24 小时制，0-23。支持跨天，例如开始 22、结束 2。",
+                "slider": { "min": 0, "max": 23, "step": 1 },
+                "default": 9
+              },
+              "end_hour": {
+                "type": "int",
+                "description": "结束小时",
+                "hint": "24 小时制，0-23，按包含结束小时处理。",
+                "slider": { "min": 0, "max": 23, "step": 1 },
+                "default": 23
+              },
+              "minute": {
+                "type": "int",
+                "description": "触发分钟",
+                "hint": "每到命中的小时，会在这个分钟触发，例如填 0 就是整点触发。",
+                "slider": { "min": 0, "max": 59, "step": 1 },
+                "default": 0
+              },
+              "message_text": {
+                "type": "text",
+                "description": "固定发送文案",
+                "hint": "可直接填写最终发送内容。支持占位符：{now} {date} {time} {hour} {minute} {weekday} {slot_name} {target_type} {target_id}。",
+                "editor_mode": true,
+                "editor_language": "text",
+                "default": ""
+              },
+              "prompt_template": {
+                "type": "text",
+                "description": "LLM 生成提示词",
+                "hint": "可选。填写后会用 proactive_llm_umo 对应的模型生成最终文案；留空则直接发送上面的固定文案。",
+                "editor_mode": true,
+                "editor_language": "text",
+                "default": ""
+              }
+            }
+          }
+        },
+        "default": []
       }
     }
   },

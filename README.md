@@ -1,6 +1,6 @@
 # 多功能生活助手（astrbot_all_char）
 
-`astrbot_all_char` 是原 char 系列多个热门插件的整合版：**一套插件**覆盖火车票、天气、股票、简易提醒、记账、千帆智能/网页搜索、点歌、今日运势、OCR、动漫识别、发邮件等高频需求，**统一配置、统一指令、统一维护**。
+`astrbot_all_char` 是原 char 系列多个热门插件的整合版：**一套插件**覆盖火车票、天气、股票、简易提醒、主动消息、记账、千帆智能/网页搜索、点歌、今日运势、OCR、动漫识别、发邮件等高频需求，**统一配置、统一指令、统一维护**。
 
 - **命令模式**：所有功能均通过明确的前缀指令调用（见下方「所有指令一览」）。
 - **口语化 / Agent 调用**：插件注册了一组 LLM 工具（FunctionTool），在自然语言对话中由 Agent 自动选择并调用，无需记命令（见「口语化调用」与「已注册的 LLM 工具一览」）。
@@ -55,11 +55,12 @@
 |------|--------------|----------|
 | **火车票** | `/火车票`、`/车票`、`/查火车票`；帮助：`/火车票帮助` | `/火车票 厦门 上海`、`/火车票 厦门 上海 明天` |
 | **简易提醒** | `/提醒`、`/提醒列表`、`/我的提醒` | `/提醒 3分钟后 喝水`、`/提醒 08:30 上班打卡`、`/提醒 列表` |
+| **主动消息** | `/主动消息`、`/主动发送`、`/主动推送` | 推荐直接在 `proactive` 配置里填写 `proactive_private_qq_ids`、`proactive_group_ids`、`proactive_time_slots`；兼容命令绑定：`/主动消息 绑定 工作群`，发送：`/主动消息 发送 群 工作群 今天 18:00 开会` |
 | **永久记忆** | `/记忆`、`/认人`、`/我是谁` | `/认人 123456789 张三 初中同学`、`/记忆 设置 123456789 老张`、`/记忆 删除别名 123456789 老张` |
 | **定时任务** | `/rmd`、`/rmdg` | 兼容原 sy 插件子命令，详见帮助 |
 | **股票** | `/股票`、`/stock`、`/自选股`、`/行情` | 查询：`/股票 查询 600519`、`/股票 查询 贵州茅台`；自选：`/股票 添加 600519`、`/股票 删除 600519`、`/股票 列表`；提醒：`/股票 提醒 09:30`、`/股票 跌到 600519 1800`、`/股票 涨到 600519 2000`；分析：`/股票 智能分析 600519`、`/股票 量化分析 600519` |
 | **基金/量化分析** | 主入口：`/基金`；子命令：`搜索`、`设置`、`分析`、`历史`、`对比`、`量化`、`智能`、`博弈` | `/基金 161226`、`/基金 分析 161226`、`/基金 量化 161226`、`/基金 博弈 161226` |
-| **天气** | `/天气`、`/天气查询`、`/查天气`；帮助：`/天气帮助` | `/天气 北京`、`/天气 北京 5` |
+| **天气** | `/天气`、`/天气查询`、`/查天气`；帮助：`/天气帮助` | `/天气 北京`、`/天气 北京 5`、`/天气 东京 明天` |
 | **Epic 免费游戏** | `/epic`、`/Epic免费`、`/喜加一`、`/e宝`；帮助：`/Epic帮助` | `/epic` |
 | **点歌** | `/点歌`、`/music`、`/唱歌`、`/唱` | `/点歌 青花`；返回候选后直接回复数字序号即可播放 |
 | **记账** | `记账支出`、`记账收入`、`查账统计`、`日统计`、`月统计`、`查账详情`、`按类统计`、`删除账单` | `记账支出 35 中午吃饭`、`记账收入 5000 工资`、`查账统计`、`日统计 2026-03-07`、`月统计 2026-03`、`查账详情`、`按类统计`、`删除账单 3` |
@@ -82,9 +83,10 @@
 | 你想做的事 | 可以这样说（示例） | 对应工具 |
 |------------|--------------------|----------|
 | 查股票 | 「贵州茅台现在多少钱」「查一下 600519 的行情」 | `stock_query` |
-| 查天气 | 「北京今天天气怎么样」「上海未来 5 天天气」 | `weather_query` |
+| 查天气 | 「北京今天天气怎么样」「东京明天天气」「上海未来 5 天天气」 | `weather_query` |
 | 查火车票 | 「厦门到上海有哪几趟车」「查一下明天厦门到上海的火车」 | `train_query` |
 | 设提醒 | 「3 分钟后提醒我喝水」「明天早上 8 点半提醒我打卡」 | `simple_reminder` |
+| 主动发消息 | 「把这条通知发到工作群」「给老王私聊发一句记得看日报」 | `proactive_send_message` |
 | 记一笔支出 | 「中午吃饭花了 35」「帮我记一笔支出 50 买咖啡」 | `bookkeeping_add_expense` |
 | 记一笔收入 | 「今天发工资 5000」「收到红包 200 记一下」 | `bookkeeping_add_income` |
 | 看账本 | 「我最近花了多少钱」「帮我看看账本总体情况」 | `bookkeeping_summary` |
@@ -104,8 +106,8 @@
 
 - **weather_query**  
   - 功能：查询城市天气。  
-  - 参数：`city`（必填，string）；`days`（选填，integer，1–7，缺省或 &lt;2 视为当天）。  
-  - 说明：优先使用配置的 `weather_api_url` / `weather_api_key`，默认 `api.nycnm.cn`。
+  - 参数：`city`（必填，string）；`days`（选填，integer，1–7）；`when`（选填，string，如 `明天`、`周一`、`未来5天`）。  
+  - 说明：默认使用 Open-Meteo，支持全球城市查询和自然语言时间；遇到重名城市时，建议写成 `Paris, FR` 这类“城市, 国家代码”格式。旧版自定义天气 API 仍可通过 `weather_api_url` 兼容接入。
 
 - **train_query**  
   - 功能：查询两地之间火车票/车次。  
@@ -120,6 +122,11 @@
 - **bookkeeping_add_expense**  
   - 功能：记录一笔支出并由 LLM 自动分类。  
   - 参数：`amount`（必填，number）；`description`（选填，string）。
+
+- **proactive_send_message**
+  - 功能：向已绑定的群聊或私聊目标主动发送一条消息。
+  - 参数：`target_alias`（必填，string）；`text`（必填，string）；`scene_type`（选填，`group` / `private` / `auto`）。
+  - 说明：仅允许管理员使用；当前插件已支持通过 `proactive_private_qq_ids`、`proactive_group_ids` 和 `proactive_time_slots` 做配置式自动发送。这个工具仍保留给“别名绑定后手动主动发送”的兼容场景。
 
 - **bookkeeping_add_income**  
   - 功能：记录一笔收入并由 LLM 自动分类。  
@@ -201,6 +208,7 @@
   > - `weather_query`：查询城市天气  
   > - `train_query`：查询火车票车次  
   > - `simple_reminder`：帮用户设置定时提醒  
+  > - `proactive_send_message`：向已绑定的群聊/私聊目标主动发送消息（仅管理员）  
   > - `bookkeeping_add_expense` / `bookkeeping_add_income` / `bookkeeping_summary`：记账与查统计  
   > - `smart_search` / `web_search`：需要联网查资料时调用  
   > - `anime_trace`：用户发动漫截图并问「这是谁/出自哪部番」时调用  
@@ -243,7 +251,7 @@
 ### 目录与代码结构
 
 - `main.py`：插件元信息、指令路由注册、LLM 工具注册，业务逻辑下沉到 utils。
-- `train_utils.py`、`sy_scheduler_utils.py`、`stock_utils.py`、`fund_analysis_utils.py`、`weather_utils.py`、`epic_utils.py`、`bookkeeping_utils.py`、`jrys_utils.py`、`ocr_utils.py`、`qianfan_search_utils.py`、`music_utils.py`、`anime_utils.py`、`email_utils.py`、`memory_utils.py`、`passive_memory_utils.py`：各功能实现。
+- `train_utils.py`、`sy_scheduler_utils.py`、`stock_utils.py`、`fund_analysis_utils.py`、`weather_utils.py`、`epic_utils.py`、`bookkeeping_utils.py`、`jrys_utils.py`、`ocr_utils.py`、`qianfan_search_utils.py`、`music_utils.py`、`anime_utils.py`、`email_utils.py`、`memory_utils.py`、`passive_memory_utils.py`、`proactive_message_utils.py`：各功能实现。
 - `fund_analyzer/`、`fund_stock/`、`eastmoney_api.py`：基金/量化分析与多智能体博弈分析的底层模块。
 - `memory_utils.py`：基于 SQLite 的 QQ 长期记忆层，支持旧版 JSON 自动迁移、管理员管理、多别名绑定，并在普通聊天进入 LLM 前自动注入当前用户记忆。
 - `passive_memory_utils.py`：被动记忆增强层，负责从自然聊天中抽取偏好/关系、从功能使用中沉淀习惯，并把人物身份与 APLR 事件回忆做联动注入。
@@ -258,7 +266,7 @@
 
 ### 配置统一（_conf_schema.json）
 
-- 仅保留一个 `_conf_schema.json`，按模块分组：`train`、`sy`、`stock`、`weather`、`epic`、`jrys`、`ocr`、`qianfan_search`、`music`、邮件等。
+- 仅保留一个 `_conf_schema.json`，按模块分组：`train`、`sy`、`stock`、`weather`、`memory`、`proactive`、`epic`、`jrys`、`ocr`、`qianfan_search`、`music`、邮件等。
 - 字段使用模块前缀（如 `train_`、`weather_`），详见同目录 `_conf_schema.json`。
 - 今日运势资源：将原 jrys 插件的 `backgroundFolder` 与 `font` 拷贝到 `astrbot_all_char/jrys_assets/` 下。
 
