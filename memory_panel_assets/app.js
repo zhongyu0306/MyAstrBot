@@ -12,6 +12,11 @@ const PREFERENCE_OPTIONS = [
   { value: "preferred_name", label: "称呼偏好" },
 ];
 
+const BOOKKEEPING_TYPE_OPTIONS = [
+  { value: "expense", label: "支出" },
+  { value: "income", label: "收入" },
+];
+
 const SCENE_OPTIONS = [
   { value: "global", label: "全局" },
   { value: "group", label: "群聊" },
@@ -92,6 +97,10 @@ function statCard(label, value) {
   return `<div class="stat-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`;
 }
 
+function insightCard(label, value) {
+  return `<div class="insight-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`;
+}
+
 function optionHtml(option, selectedValue = "") {
   return `<option value="${escapeHtml(option.value)}" ${String(option.value) === String(selectedValue) ? "selected" : ""}>${escapeHtml(option.label)}</option>`;
 }
@@ -112,6 +121,15 @@ function resetForm(formEl) {
 
 function userDisplayName(user) {
   return user.memory_name || user.platform_name || user.qq_id || "未命名用户";
+}
+
+function formatMoney(value) {
+  const amount = Number(value || 0);
+  return `¥${amount.toFixed(2)}`;
+}
+
+function bookkeepingTypeLabel(value) {
+  return value === "income" ? "收入" : "支出";
 }
 
 function directoryUserOptions() {
@@ -146,6 +164,8 @@ function renderStats(stats = {}) {
     statCard("关系", stats.relations || 0),
     statCard("习惯", stats.habits || 0),
     statCard("事件", stats.events || 0),
+    statCard("账本", stats.bookkeeping || 0),
+    statCard("提醒", stats.reminders || 0),
   ].join("");
 }
 
@@ -165,6 +185,8 @@ function renderUsers(users = []) {
         <span class="count-badge">关系 ${user.counts.relations}</span>
         <span class="count-badge">习惯 ${user.counts.habits}</span>
         <span class="count-badge">事件 ${user.counts.events}</span>
+        <span class="count-badge">账本 ${user.counts.bookkeeping || 0}</span>
+        <span class="count-badge">提醒 ${user.counts.reminders || 0}</span>
       </div>
     </div>
   `).join("");
@@ -378,9 +400,112 @@ function renderTimeline(events = []) {
   });
 }
 
+function renderBookkeeping(bookkeeping = {}) {
+  const summary = bookkeeping.summary || {};
+  $("#bookkeeping-summary").innerHTML = [
+    insightCard("记录数", summary.total_records || 0),
+    insightCard("总收入", formatMoney(summary.total_income || 0)),
+    insightCard("总支出", formatMoney(summary.total_expense || 0)),
+    insightCard("当前结余", formatMoney(summary.balance || 0)),
+  ].join("");
+
+  renderEditableList($("#bookkeeping-list"), bookkeeping.records || [], {
+    fields: [
+      { key: "type", type: "select", options: BOOKKEEPING_TYPE_OPTIONS },
+      { key: "category", extra: 'placeholder="分类"' },
+      { key: "amount", extra: 'type="number" step="0.01" min="0"' },
+      { key: "created_at", extra: 'placeholder="YYYY-MM-DD HH:MM:SS"' },
+      { key: "description", extra: 'placeholder="备注"' },
+    ],
+    preparePayload: (payload) => {
+      payload.record_type = payload.type;
+      delete payload.type;
+    },
+    onSave: async (id, payload) => {
+      await api(`/api/users/${encodeURIComponent(state.selectedUserId)}/bookkeeping/${id}`, {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      });
+      await loadUser(state.selectedUserId);
+      await loadOverview($("#user-search").value.trim());
+    },
+    onDelete: async (id) => {
+      await api(`/api/users/${encodeURIComponent(state.selectedUserId)}/bookkeeping/${id}`, {
+        method: "DELETE",
+      });
+      await loadUser(state.selectedUserId);
+      await loadOverview($("#user-search").value.trim());
+    },
+  });
+}
+
+function renderReminderHistory(history = []) {
+  const container = $("#reminder-history-list");
+  if (!history.length) {
+    renderEmpty(container);
+    return;
+  }
+  container.innerHTML = history.map((item) => `
+    <div class="timeline-item" data-id="${escapeHtml(item.id)}">
+      <div class="timeline-meta">
+        ${escapeHtml(item.status || "unknown")} · 触发 ${escapeHtml(item.run_at || "-")} · 会话 ${escapeHtml(item.session_id || "-")}
+      </div>
+      <div class="timeline-body">${escapeHtml(item.text || "")}</div>
+      <div class="timeline-meta">归档 ${escapeHtml(item.archived_at || item.finished_at || item.created_at || "-")}</div>
+      <div class="actions">
+        <button type="button" class="danger-btn" data-delete-history-id="${escapeHtml(item.id)}">删除</button>
+      </div>
+    </div>
+  `).join("");
+  container.querySelectorAll("[data-delete-history-id]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await api(`/api/users/${encodeURIComponent(state.selectedUserId)}/simple-reminders/${button.dataset.deleteHistoryId}`, {
+        method: "DELETE",
+      });
+      await loadUser(state.selectedUserId);
+      await loadOverview($("#user-search").value.trim());
+    });
+  });
+}
+
+function renderReminders(reminders = {}) {
+  const pending = reminders.pending || [];
+  const history = reminders.history || [];
+  $("#reminder-summary").innerHTML = [
+    insightCard("待执行", pending.length),
+    insightCard("已归档", history.length),
+  ].join("");
+
+  renderEditableList($("#reminders-list"), pending, {
+    fields: [
+      { key: "session_id", extra: 'placeholder="会话 ID"' },
+      { key: "run_at", extra: 'placeholder="YYYY-MM-DD HH:MM:SS"' },
+      { key: "text", extra: 'placeholder="提醒内容"' },
+    ],
+    onSave: async (id, payload) => {
+      await api(`/api/users/${encodeURIComponent(state.selectedUserId)}/simple-reminders/${id}`, {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      });
+      await loadUser(state.selectedUserId);
+      await loadOverview($("#user-search").value.trim());
+    },
+    onDelete: async (id) => {
+      await api(`/api/users/${encodeURIComponent(state.selectedUserId)}/simple-reminders/${id}`, {
+        method: "DELETE",
+      });
+      await loadUser(state.selectedUserId);
+      await loadOverview($("#user-search").value.trim());
+    },
+  });
+
+  renderReminderHistory(history);
+}
+
 function fillStaticSelects() {
   renderSelect($("#alias-scene-type"), SCENE_OPTIONS, "global");
   renderSelect($("#preference-type-select"), PREFERENCE_OPTIONS, "like");
+  renderSelect($("#bookkeeping-type-select"), BOOKKEEPING_TYPE_OPTIONS, "expense");
   renderSelect($("#relation-type-select"), RELATION_OPTIONS, "朋友");
   renderSelect($("#habit-module-select"), HABIT_MODULES, HABIT_MODULES[0].value);
   updateAliasSceneValueVisibility();
@@ -474,6 +599,8 @@ function renderDetail(detail) {
     },
   });
 
+  renderBookkeeping(detail.bookkeeping || {});
+  renderReminders(detail.reminders || {});
   renderTimeline(detail.events || []);
 }
 
@@ -606,6 +733,33 @@ function bindForms() {
     resetForm(formEl);
     $("#event-form [name='confidence']").value = "0.82";
     $(currentSourceText("#event-form")).value = "记忆面板手动录入";
+    await loadUser(state.selectedUserId);
+    await loadOverview($("#user-search").value.trim());
+  });
+
+  $("#bookkeeping-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const formEl = event.currentTarget;
+    const payload = Object.fromEntries(new FormData(formEl).entries());
+    await api(`/api/users/${encodeURIComponent(state.selectedUserId)}/bookkeeping`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    resetForm(formEl);
+    $("#bookkeeping-type-select").value = "expense";
+    await loadUser(state.selectedUserId);
+    await loadOverview($("#user-search").value.trim());
+  });
+
+  $("#reminder-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const formEl = event.currentTarget;
+    const payload = Object.fromEntries(new FormData(formEl).entries());
+    await api(`/api/users/${encodeURIComponent(state.selectedUserId)}/simple-reminders`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    resetForm(formEl);
     await loadUser(state.selectedUserId);
     await loadOverview($("#user-search").value.trim());
   });

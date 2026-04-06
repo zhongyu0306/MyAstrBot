@@ -1,6 +1,7 @@
 # 邮件发送（QQ 邮箱 SMTP + 授权码）
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import inspect
 import json
@@ -17,6 +18,7 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.star import Context, StarTools
 
+from .memory_state_store import load_json_state, save_json_state
 from .passive_memory_utils import record_passive_habit
 
 # 匹配常见邮箱地址（含 qq.com、163.com 等）
@@ -24,6 +26,7 @@ EMAIL_PATTERN = re.compile(r"[^\s@]+@[^\s@]+\.[^\s@]+")
 _EMAIL_RECENT_SEND_CACHE: dict[str, float] = {}
 _EMAIL_DEDUP_WINDOW_SECONDS = 20.0
 _EMAIL_HISTORY_SUMMARY_FILE = "email_history_summaries.json"
+_EMAIL_SUMMARY_STATE_NAMESPACE = "email_history_summaries"
 
 
 def _get_email_summary_file_path() -> Path:
@@ -33,11 +36,13 @@ def _get_email_summary_file_path() -> Path:
 
 
 def _load_email_summary_map() -> dict:
-    path = _get_email_summary_file_path()
-    if not path.exists():
-        return {}
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = load_json_state(
+            _EMAIL_SUMMARY_STATE_NAMESPACE,
+            default={},
+            normalizer=lambda value: value if isinstance(value, dict) else {},
+            legacy_path=_get_email_summary_file_path(),
+        )
         return data if isinstance(data, dict) else {}
     except Exception as e:
         logger.warning("[email] 读取历史总结缓存失败: %s", e)
@@ -45,11 +50,8 @@ def _load_email_summary_map() -> dict:
 
 
 def _save_email_summary_map(summary_map: dict) -> None:
-    path = _get_email_summary_file_path()
-    tmp = path.with_suffix(path.suffix + ".tmp")
     try:
-        tmp.write_text(json.dumps(summary_map, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(path)
+        save_json_state(_EMAIL_SUMMARY_STATE_NAMESPACE, summary_map)
     except Exception as e:
         logger.warning("[email] 保存历史总结缓存失败: %s", e)
 
@@ -539,7 +541,8 @@ async def _generate_and_send_email(
             subject = llm_subject[:200]
             body = llm_body
 
-    ok, msg = send_email_sync(
+    ok, msg = await asyncio.to_thread(
+        send_email_sync,
         sender=sender,
         auth_code=auth_code,
         to_addrs=[to_addr],

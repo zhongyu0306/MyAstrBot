@@ -352,6 +352,38 @@
       }
     }
   },
+  "slang": {
+    "description": "群聊黑话学习",
+    "hint": "学习当前群聊 / 当前私聊里的特殊说法，并在相关对话时自动补充解释。",
+    "type": "object",
+    "items": {
+      "slang_enabled": {
+        "description": "启用黑话词典",
+        "type": "bool",
+        "hint": "关闭后不再自动学习，也不会在对话前注入黑话解释。",
+        "default": true
+      },
+      "slang_auto_learn_enabled": {
+        "description": "启用自动学习",
+        "type": "bool",
+        "hint": "只从“XX就是YY”这类比较明确的解释句里学习，默认偏保守，减少误学。",
+        "default": true
+      },
+      "slang_llm_auto_learn_enabled": {
+        "description": "启用模型辅助自动学习",
+        "type": "bool",
+        "hint": "在规则没命中时，会让当前会话模型尝试从更自然的解释句里保守提取黑话，如“以后我说XX就是YY”。关闭可减少模型调用。",
+        "default": true
+      },
+      "slang_max_injected_terms": {
+        "description": "单次最多注入黑话条数",
+        "type": "int",
+        "hint": "当前消息命中了黑话，或明显在问“什么意思/这个梗啥意思”时，最多注入多少条解释。",
+        "slider": { "min": 1, "max": 12, "step": 1 },
+        "default": 5
+      }
+    }
+  },
   "proactive": {
     "description": "主动消息发送",
     "hint": "用于配置式主动消息：直接填写私聊 QQ 列表、群号列表和 24 小时时段规则，无需再用命令绑定目标。",

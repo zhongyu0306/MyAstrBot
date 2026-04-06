@@ -14,8 +14,23 @@ from urllib.parse import parse_qs, urlparse
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 
+from .bookkeeping_utils import (
+    create_bookkeeping_record_for_user,
+    delete_bookkeeping_record_for_user,
+    get_bookkeeping_counts_by_user,
+    get_bookkeeping_summary_for_user,
+    list_bookkeeping_records_for_user,
+    update_bookkeeping_record_for_user,
+)
 from .memory_utils import init_user_memory_store
 from .passive_memory_utils import init_passive_memory_store
+from .sy_scheduler_utils import (
+    create_simple_reminder_for_creator,
+    delete_simple_reminder_for_creator,
+    get_simple_reminder_counts_by_creator,
+    list_simple_reminders_for_creator,
+    update_simple_reminder_for_creator,
+)
 
 
 class _ReusableThreadingHTTPServer(ThreadingHTTPServer):
@@ -168,11 +183,22 @@ class MemoryPanelManager:
             "qq_id": qq_id,
             "memory_name": aliases[0] if aliases else "",
             "memory_aliases": aliases,
+            "scoped_aliases": entry.get("scoped_aliases") or [],
             "platform_name": str(entry.get("platform_name") or "").strip(),
             "note": str(entry.get("note") or "").strip(),
             "last_seen_at": str(entry.get("last_seen_at") or "").strip(),
             "updated_at": str(entry.get("updated_at") or "").strip(),
-            "counts": counts.get(qq_id, {"preferences": 0, "relations": 0, "habits": 0, "events": 0}),
+            "counts": counts.get(
+                qq_id,
+                {
+                    "preferences": 0,
+                    "relations": 0,
+                    "habits": 0,
+                    "events": 0,
+                    "bookkeeping": 0,
+                    "reminders": 0,
+                },
+            ),
         }
 
     @staticmethod
@@ -184,16 +210,36 @@ class MemoryPanelManager:
 
     def _build_user_list(self, query: str = "") -> list[dict[str, Any]]:
         memory_store = init_user_memory_store()
-        passive_store = init_passive_memory_store()
+        counts = self._get_counts_by_user()
         records = memory_store.search_memories(query, limit=100, include_observed_only=True) if query else memory_store.list_all_memories()
-        counts = passive_store.get_counts_by_user()
-        return [self._build_user_item(entry, counts) for entry in records[:100]]
+        seen = {str(entry.get("qq_id") or "").strip() for entry in records}
+        extra_entries: list[dict[str, Any]] = []
+        normalized_query = str(query or "").strip()
+        for qq_id in counts:
+            cleaned_id = str(qq_id or "").strip()
+            if not cleaned_id or cleaned_id in seen:
+                continue
+            if normalized_query and normalized_query not in cleaned_id:
+                continue
+            extra_entries.append(
+                {
+                    "qq_id": cleaned_id,
+                    "memory_aliases": [],
+                    "scoped_aliases": [],
+                    "platform_name": "",
+                    "note": "",
+                    "last_seen_at": "",
+                    "updated_at": "",
+                }
+            )
+        merged = [*records, *extra_entries]
+        return [self._build_user_item(entry, counts) for entry in merged[:100]]
 
     def _build_user_detail(self, qq_id: str) -> dict[str, Any]:
         memory_store = init_user_memory_store()
         passive_store = init_passive_memory_store()
         entry = memory_store.get_memory(qq_id) or {"qq_id": qq_id, "memory_aliases": [], "platform_name": "", "note": ""}
-        user_item = self._build_user_item(entry, passive_store.get_counts_by_user())
+        user_item = self._build_user_item(entry, self._get_counts_by_user())
         center_label = user_item["memory_name"] or user_item["platform_name"] or user_item["qq_id"]
         return {
             "user": user_item,
@@ -201,17 +247,63 @@ class MemoryPanelManager:
             "relations": passive_store.list_relations(qq_id),
             "habits": passive_store.list_habits(qq_id),
             "events": passive_store.list_events(qq_id),
+            "bookkeeping": {
+                "summary": get_bookkeeping_summary_for_user(qq_id),
+                "records": list_bookkeeping_records_for_user(qq_id, limit=100),
+            },
+            "reminders": list_simple_reminders_for_creator(qq_id, pending_limit=100, history_limit=50),
             "graph": passive_store.build_relation_graph(qq_id, center_label=center_label),
         }
+
+    def _get_counts_by_user(self) -> dict[str, dict[str, int]]:
+        passive_counts = init_passive_memory_store().get_counts_by_user()
+        bookkeeping_counts = get_bookkeeping_counts_by_user()
+        reminder_counts = get_simple_reminder_counts_by_creator()
+        counts: dict[str, dict[str, int]] = {}
+
+        def ensure_bucket(qq_id: str) -> dict[str, int]:
+            return counts.setdefault(
+                qq_id,
+                {
+                    "preferences": 0,
+                    "relations": 0,
+                    "habits": 0,
+                    "events": 0,
+                    "bookkeeping": 0,
+                    "reminders": 0,
+                },
+            )
+
+        for qq_id, item in passive_counts.items():
+            bucket = ensure_bucket(str(qq_id or "").strip())
+            for key in ("preferences", "relations", "habits", "events"):
+                bucket[key] = int(item.get(key) or 0)
+
+        for qq_id, total in bookkeeping_counts.items():
+            ensure_bucket(str(qq_id or "").strip())["bookkeeping"] = int(total or 0)
+
+        for qq_id, total in reminder_counts.items():
+            ensure_bucket(str(qq_id or "").strip())["reminders"] = int(total or 0)
+
+        return counts
 
     def _overview_payload(self, query: str = "") -> dict[str, Any]:
         memory_store = init_user_memory_store()
         passive_store = init_passive_memory_store()
+        counts = self._get_counts_by_user()
+        all_user_ids = {
+            str(item.get("qq_id") or "").strip()
+            for item in memory_store.list_all_memories()
+            if str(item.get("qq_id") or "").strip()
+        }
+        all_user_ids.update({qq_id for qq_id in counts if str(qq_id or "").strip()})
         return {
             "stats": {
-                "users": len(memory_store.list_all_memories()),
+                "users": len(all_user_ids),
                 "manual_users": len(memory_store.list_memories()),
                 **passive_store.get_dashboard_stats(),
+                "bookkeeping": sum(item.get("bookkeeping", 0) for item in counts.values()),
+                "reminders": sum(item.get("reminders", 0) for item in counts.values()),
             },
             "users": self._build_user_list(query),
         }
@@ -356,6 +448,38 @@ class MemoryPanelManager:
             )
             return 200, {"record": record, "detail": self._build_user_detail(qq_id)}
 
+        if path.startswith("/api/users/") and path.endswith("/bookkeeping") and method == "POST":
+            qq_id = path.removeprefix("/api/users/").removesuffix("/bookkeeping").strip("/")
+            record = create_bookkeeping_record_for_user(
+                qq_id,
+                record_type=str(payload.get("record_type") or "").strip(),
+                category=str(payload.get("category") or "").strip(),
+                amount=self._to_float(payload.get("amount"), 0),
+                description=str(payload.get("description") or "").strip(),
+                created_at=str(payload.get("created_at") or "").strip(),
+            )
+            if not record:
+                return 400, {"error": "invalid_bookkeeping_record"}
+            return 200, {"record": record, "detail": self._build_user_detail(qq_id)}
+
+        if path.startswith("/api/users/") and path.endswith("/simple-reminders") and method == "POST":
+            qq_id = path.removeprefix("/api/users/").removesuffix("/simple-reminders").strip("/")
+            user_entry = memory_store.get_memory(qq_id) or {}
+            record = create_simple_reminder_for_creator(
+                qq_id,
+                creator_name=str(
+                    payload.get("creator_name")
+                    or user_entry.get("platform_name")
+                    or (user_entry.get("memory_aliases") or [""])[0]
+                ).strip(),
+                session_id=str(payload.get("session_id") or "").strip(),
+                text=str(payload.get("text") or "").strip(),
+                run_at=str(payload.get("run_at") or "").strip(),
+            )
+            if not record:
+                return 400, {"error": "invalid_simple_reminder"}
+            return 200, {"record": record, "detail": self._build_user_detail(qq_id)}
+
         if path.startswith("/api/preferences/"):
             record_id = int(path.removeprefix("/api/preferences/").strip("/"))
             if method == "PUT":
@@ -409,6 +533,44 @@ class MemoryPanelManager:
                 )
                 return 200, {"record": record}
             return 200, {"ok": passive_store.delete_event(record_id)}
+
+        if path.startswith("/api/users/") and "/bookkeeping/" in path:
+            suffix = path.removeprefix("/api/users/")
+            qq_id, _, record_id_text = suffix.partition("/bookkeeping/")
+            qq_id = qq_id.strip("/")
+            record_id = int(str(record_id_text or "").strip("/"))
+            if method == "PUT":
+                record = update_bookkeeping_record_for_user(
+                    qq_id,
+                    record_id,
+                    record_type=str(payload.get("record_type") or "").strip(),
+                    category=str(payload.get("category") or "").strip(),
+                    amount=self._to_float(payload.get("amount"), 0),
+                    description=str(payload.get("description") or "").strip(),
+                    created_at=str(payload.get("created_at") or "").strip(),
+                )
+                if not record:
+                    return 400, {"error": "invalid_bookkeeping_record"}
+                return 200, {"record": record}
+            return 200, {"ok": delete_bookkeeping_record_for_user(qq_id, record_id)}
+
+        if path.startswith("/api/users/") and "/simple-reminders/" in path:
+            suffix = path.removeprefix("/api/users/")
+            qq_id, _, reminder_id = suffix.partition("/simple-reminders/")
+            qq_id = qq_id.strip("/")
+            cleaned_reminder_id = str(reminder_id or "").strip("/")
+            if method == "PUT":
+                record = update_simple_reminder_for_creator(
+                    cleaned_reminder_id,
+                    qq_id,
+                    session_id=str(payload.get("session_id") or "").strip(),
+                    text=str(payload.get("text") or "").strip(),
+                    run_at=str(payload.get("run_at") or "").strip(),
+                )
+                if not record:
+                    return 400, {"error": "invalid_simple_reminder"}
+                return 200, {"record": record}
+            return 200, {"ok": delete_simple_reminder_for_creator(cleaned_reminder_id, qq_id)}
 
         return 404, {"error": "not_found"}
 

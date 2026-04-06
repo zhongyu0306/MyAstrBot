@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -16,6 +16,7 @@ import aiohttp
 
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.star import Context, StarTools
+from .memory_state_store import load_json_state, save_json_state
 
 # 本地每日上限（达到后不再调用接口）
 DAILY_LIMIT_SMART = 100
@@ -23,6 +24,7 @@ DAILY_LIMIT_WEB = 1000
 PLUGIN_DATA_DIR = "astrbot_all_char"
 COUNT_FILE_NAME = "qianfan_search_daily.json"
 _COUNT_FILE_LOCK = asyncio.Lock()
+_COUNT_STATE_NAMESPACE = "qianfan_search_daily"
 
 # 千帆 ai_search 接口（鉴权：X-Appbuilder-Authorization: Bearer <API Key>，仅需 API Key）
 CHAT_COMPLETIONS_URL = "https://qianfan.baidubce.com/v2/ai_search/chat/completions"
@@ -196,16 +198,36 @@ def _today_str() -> str:
     return datetime.now().strftime("%Y-%m-%d")
 
 
+def _prune_count_data(data: dict[str, Any], keep_days: int = 14) -> dict[str, Any]:
+    if keep_days <= 0:
+        return {}
+    cutoff = datetime.now().date() - timedelta(days=keep_days - 1)
+    pruned: dict[str, Any] = {}
+    for day, counts in data.items():
+        try:
+            parsed_day = datetime.strptime(str(day), "%Y-%m-%d").date()
+        except Exception:
+            continue
+        if parsed_day >= cutoff and isinstance(counts, dict):
+            pruned[str(day)] = counts
+    return pruned
+
+
+def _write_count_data(path: Path, data: dict[str, Any]) -> None:
+    temp_path = path.with_suffix(f"{path.suffix}.tmp")
+    temp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_path.replace(path)
+
+
 async def _get_daily_counts() -> tuple[int, int]:
     """返回今日已用次数 (智能搜索, 网页搜索)。"""
-    path = _get_count_file_path()
     async with _COUNT_FILE_LOCK:
-        if not path.exists():
-            return 0, 0
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return 0, 0
+        data = load_json_state(
+            _COUNT_STATE_NAMESPACE,
+            default={},
+            normalizer=lambda value: value if isinstance(value, dict) else {},
+            legacy_path=_get_count_file_path(),
+        )
         today = _today_str()
         day_data = data.get(today) or {}
         return day_data.get("smart_search", 0), day_data.get("web_search", 0)
@@ -213,20 +235,21 @@ async def _get_daily_counts() -> tuple[int, int]:
 
 async def _increment_daily_count(which: str) -> int:
     """which 为 'smart_search' 或 'web_search'。递增并返回今日该类型的新次数。"""
-    path = _get_count_file_path()
+    if which not in {"smart_search", "web_search"}:
+        raise ValueError(f"unsupported counter type: {which}")
     async with _COUNT_FILE_LOCK:
-        if path.exists():
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
-                data = {}
-        else:
-            data = {}
+        data = load_json_state(
+            _COUNT_STATE_NAMESPACE,
+            default={},
+            normalizer=lambda value: value if isinstance(value, dict) else {},
+            legacy_path=_get_count_file_path(),
+        )
         today = _today_str()
+        data = _prune_count_data(data if isinstance(data, dict) else {})
         if today not in data:
             data[today] = {"smart_search": 0, "web_search": 0}
         data[today][which] = data[today].get(which, 0) + 1
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        save_json_state(_COUNT_STATE_NAMESPACE, data)
         return data[today][which]
 
 

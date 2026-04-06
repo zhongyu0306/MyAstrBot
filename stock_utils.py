@@ -1,8 +1,10 @@
 import asyncio
 import json
 import re
+import sqlite3
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
@@ -13,6 +15,7 @@ from .config_utils import ensure_flat_config
 from .fund_analyzer import AIFundAnalyzer
 from .fund_analysis_utils import can_handle_stock_extension, handle_stock_extension_command
 from .fund_stock import DebateEngine, StockAnalyzer as AkStockAnalyzer
+from .memory_state_store import delete_json_state, load_json_state, save_json_state, shared_conn
 from .passive_memory_utils import record_passive_habit
 
 
@@ -25,22 +28,231 @@ def _watchlist_file():
     return _data_dir() / "watchlist.json"
 
 
+def _watchlist_state_namespace() -> str:
+    return "stock_watchlist"
+
+
+_WATCHLIST_MIGRATION_NAMESPACE = "stock_watchlist_migrated"
+_WATCHLIST_STOCKS_TABLE = "stock_watchlist_stocks"
+_WATCHLIST_REMINDERS_TABLE = "stock_watchlist_reminders"
+_WATCHLIST_ALERTS_TABLE = "stock_watchlist_price_alerts"
+_STOCK_MAP_MIGRATION_NAMESPACE = "stock_code_cache_migrated"
+_STOCK_MAP_TABLE = "stock_code_cache"
+
+
 def _stock_map_file():
     _data_dir().mkdir(parents=True, exist_ok=True)
     return _data_dir() / "stock_codes.json"
 
 
-def _load_stock_map() -> list[dict]:
+def _ensure_watchlist_tables() -> None:
+    with shared_conn() as conn:
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {_WATCHLIST_STOCKS_TABLE} (
+                session_id TEXT NOT NULL,
+                code TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(session_id, code)
+            )
+            """
+        )
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {_WATCHLIST_REMINDERS_TABLE} (
+                session_id TEXT NOT NULL,
+                time TEXT NOT NULL,
+                repeat_type TEXT NOT NULL,
+                creator_id TEXT NOT NULL DEFAULT '',
+                creator_name TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(session_id, time)
+            )
+            """
+        )
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {_WATCHLIST_ALERTS_TABLE} (
+                session_id TEXT NOT NULL,
+                code TEXT NOT NULL,
+                condition TEXT NOT NULL,
+                target_price REAL NOT NULL,
+                creator_id TEXT NOT NULL DEFAULT '',
+                creator_name TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(session_id, code, condition)
+            )
+            """
+        )
+        conn.commit()
+
+
+def _is_watchlist_migrated() -> bool:
+    return bool(
+        load_json_state(
+            _WATCHLIST_MIGRATION_NAMESPACE,
+            default=False,
+            normalizer=lambda value: bool(value),
+        )
+    )
+
+
+def _mark_watchlist_migrated() -> None:
+    save_json_state(_WATCHLIST_MIGRATION_NAMESPACE, True)
+
+
+def _normalize_watchlist_payload(data: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(data, dict):
+        return {}
+    normalized: dict[str, dict[str, Any]] = {}
+    for raw_session_id, raw_record in data.items():
+        session_id = str(raw_session_id or "").strip()
+        if not session_id or not isinstance(raw_record, dict):
+            continue
+        stocks = [_normalize_code(str(code or "")) for code in (raw_record.get("stocks") or [])]
+        reminders = []
+        for item in raw_record.get("reminders") or []:
+            if not isinstance(item, dict):
+                continue
+            time_str = str(item.get("time") or "").strip()
+            if not time_str:
+                continue
+            repeat = "once" if str(item.get("repeat") or "").strip() == "once" else "daily"
+            reminders.append(
+                {
+                    "time": time_str,
+                    "repeat": repeat,
+                    "creator_id": str(item.get("creator_id") or "").strip(),
+                    "creator_name": str(item.get("creator_name") or "").strip(),
+                }
+            )
+        alerts = []
+        for item in raw_record.get("price_alerts") or []:
+            if not isinstance(item, dict):
+                continue
+            code = _normalize_code(str(item.get("code") or ""))
+            condition = str(item.get("condition") or "").strip()
+            if code == "" or condition not in {"below", "above"}:
+                continue
+            try:
+                target_price = float(item.get("target_price") or 0)
+            except Exception:
+                continue
+            alerts.append(
+                {
+                    "code": code,
+                    "target_price": target_price,
+                    "condition": condition,
+                    "creator_id": str(item.get("creator_id") or "").strip(),
+                    "creator_name": str(item.get("creator_name") or "").strip(),
+                }
+            )
+        normalized[session_id] = {
+            "stocks": [code for code in stocks if code],
+            "reminders": reminders,
+            "price_alerts": alerts,
+        }
+    return normalized
+
+
+def _ensure_watchlist_migrated() -> None:
+    _ensure_watchlist_tables()
+    if _is_watchlist_migrated():
+        return
+    legacy = load_json_state(
+        _watchlist_state_namespace(),
+        default={},
+        normalizer=lambda value: value if isinstance(value, dict) else {},
+        legacy_path=_watchlist_file(),
+    )
+    normalized = _normalize_watchlist_payload(legacy)
+    if normalized:
+        _save_watchlist_to_tables(normalized)
+    _mark_watchlist_migrated()
+    delete_json_state(_watchlist_state_namespace())
+
+
+def _ensure_stock_map_table() -> None:
+    with shared_conn() as conn:
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {_STOCK_MAP_TABLE} (
+                code TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_{_STOCK_MAP_TABLE}_name "
+            f"ON {_STOCK_MAP_TABLE}(name)"
+        )
+        conn.commit()
+
+
+def _normalize_stock_map_item(item: dict[str, Any]) -> tuple[str, str] | None:
+    if not isinstance(item, dict):
+        return None
+    code = _normalize_code(str(item.get("code") or ""))
+    name = str(item.get("name") or "").strip()
+    if not code or not name:
+        return None
+    return code, name
+
+
+def _is_stock_map_migrated() -> bool:
+    return bool(
+        load_json_state(
+            _STOCK_MAP_MIGRATION_NAMESPACE,
+            default=False,
+            normalizer=lambda value: bool(value),
+        )
+    )
+
+
+def _mark_stock_map_migrated() -> None:
+    save_json_state(_STOCK_MAP_MIGRATION_NAMESPACE, True)
+
+
+def _ensure_stock_map_migrated() -> None:
+    _ensure_stock_map_table()
+    if _is_stock_map_migrated():
+        return
     path = _stock_map_file()
     if not path.exists():
-        return []
+        _mark_stock_map_migrated()
+        return
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, dict) and "stocks" in data:
-            return data["stocks"]
-        if isinstance(data, list):
-            return data
+            raw_items = data["stocks"]
+        elif isinstance(data, list):
+            raw_items = data
+        else:
+            raw_items = []
+        normalized = [item for item in (_normalize_stock_map_item(x) for x in raw_items) if item is not None]
+        if normalized:
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with shared_conn() as conn:
+                conn.executemany(
+                    f"INSERT OR REPLACE INTO {_STOCK_MAP_TABLE}(code, name, updated_at) VALUES (?, ?, ?)",
+                    [(code, name, now) for code, name in normalized],
+                )
+                conn.commit()
+    except Exception as e:
+        logger.error("迁移股票代码表失败: %s", e)
+    _mark_stock_map_migrated()
+
+
+def _load_stock_map() -> list[dict]:
+    _ensure_stock_map_migrated()
+    try:
+        with shared_conn() as conn:
+            rows = conn.execute(
+                f"SELECT code, name FROM {_STOCK_MAP_TABLE} ORDER BY updated_at DESC, code ASC"
+            ).fetchall()
+        return [{"code": str(row["code"]), "name": str(row["name"])} for row in rows]
     except Exception as e:
         logger.error("加载股票代码表失败: %s", e)
     return []
@@ -48,8 +260,18 @@ def _load_stock_map() -> list[dict]:
 
 def _save_stock_map(stocks: list[dict]) -> None:
     try:
-        with open(_stock_map_file(), "w", encoding="utf-8") as f:
-            json.dump({"stocks": stocks}, f, ensure_ascii=False, indent=2)
+        _ensure_stock_map_table()
+        normalized = [item for item in (_normalize_stock_map_item(x) for x in stocks) if item is not None]
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with shared_conn() as conn:
+            conn.execute(f"DELETE FROM {_STOCK_MAP_TABLE}")
+            if normalized:
+                conn.executemany(
+                    f"INSERT INTO {_STOCK_MAP_TABLE}(code, name, updated_at) VALUES (?, ?, ?)",
+                    [(code, name, now) for code, name in normalized],
+                )
+            conn.commit()
+        _mark_stock_map_migrated()
     except Exception as e:
         logger.error("保存股票代码表失败: %s", e)
 
@@ -74,21 +296,127 @@ def _normalize_code(code: str) -> str:
 
 
 def _load_watchlist() -> dict:
-    path = _watchlist_file()
-    if not path.exists():
-        return {}
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        _ensure_watchlist_migrated()
+        with shared_conn() as conn:
+            stocks_rows = conn.execute(
+                f"SELECT session_id, code FROM {_WATCHLIST_STOCKS_TABLE} ORDER BY session_id, created_at, code"
+            ).fetchall()
+            reminder_rows = conn.execute(
+                f"""
+                SELECT session_id, time, repeat_type, creator_id, creator_name
+                FROM {_WATCHLIST_REMINDERS_TABLE}
+                ORDER BY session_id, time
+                """
+            ).fetchall()
+            alert_rows = conn.execute(
+                f"""
+                SELECT session_id, code, target_price, condition, creator_id, creator_name
+                FROM {_WATCHLIST_ALERTS_TABLE}
+                ORDER BY session_id, code, condition
+                """
+            ).fetchall()
+        data: dict[str, dict[str, Any]] = {}
+        for row in stocks_rows:
+            session_id = str(row["session_id"])
+            rec = data.setdefault(session_id, {"stocks": [], "reminders": [], "price_alerts": []})
+            rec["stocks"].append(str(row["code"]))
+        for row in reminder_rows:
+            session_id = str(row["session_id"])
+            rec = data.setdefault(session_id, {"stocks": [], "reminders": [], "price_alerts": []})
+            rec["reminders"].append(
+                {
+                    "time": str(row["time"]),
+                    "repeat": str(row["repeat_type"]),
+                    "creator_id": str(row["creator_id"] or ""),
+                    "creator_name": str(row["creator_name"] or ""),
+                }
+            )
+        for row in alert_rows:
+            session_id = str(row["session_id"])
+            rec = data.setdefault(session_id, {"stocks": [], "reminders": [], "price_alerts": []})
+            rec["price_alerts"].append(
+                {
+                    "code": str(row["code"]),
+                    "target_price": float(row["target_price"]),
+                    "condition": str(row["condition"]),
+                    "creator_id": str(row["creator_id"] or ""),
+                    "creator_name": str(row["creator_name"] or ""),
+                }
+            )
+        return data
     except Exception as e:
         logger.error("加载自选数据失败: %s", e)
         return {}
 
 
+def _save_watchlist_to_tables(data: dict[str, dict[str, Any]]) -> None:
+    normalized = _normalize_watchlist_payload(data)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    stock_rows: list[tuple[str, str, str]] = []
+    reminder_rows: list[tuple[str, str, str, str, str, str]] = []
+    alert_rows: list[tuple[str, str, str, float, str, str, str]] = []
+    for session_id, rec in normalized.items():
+        for code in rec.get("stocks") or []:
+            stock_rows.append((session_id, code, now))
+        for item in rec.get("reminders") or []:
+            reminder_rows.append(
+                (
+                    session_id,
+                    str(item.get("time") or "").strip(),
+                    str(item.get("repeat") or "daily").strip(),
+                    str(item.get("creator_id") or "").strip(),
+                    str(item.get("creator_name") or "").strip(),
+                    now,
+                )
+            )
+        for item in rec.get("price_alerts") or []:
+            alert_rows.append(
+                (
+                    session_id,
+                    str(item.get("code") or "").strip(),
+                    str(item.get("condition") or "").strip(),
+                    float(item.get("target_price") or 0),
+                    str(item.get("creator_id") or "").strip(),
+                    str(item.get("creator_name") or "").strip(),
+                    now,
+                )
+            )
+    with shared_conn() as conn:
+        conn.execute(f"DELETE FROM {_WATCHLIST_STOCKS_TABLE}")
+        conn.execute(f"DELETE FROM {_WATCHLIST_REMINDERS_TABLE}")
+        conn.execute(f"DELETE FROM {_WATCHLIST_ALERTS_TABLE}")
+        if stock_rows:
+            conn.executemany(
+                f"INSERT INTO {_WATCHLIST_STOCKS_TABLE}(session_id, code, created_at) VALUES (?, ?, ?)",
+                stock_rows,
+            )
+        if reminder_rows:
+            conn.executemany(
+                f"""
+                INSERT INTO {_WATCHLIST_REMINDERS_TABLE}(
+                    session_id, time, repeat_type, creator_id, creator_name, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                reminder_rows,
+            )
+        if alert_rows:
+            conn.executemany(
+                f"""
+                INSERT INTO {_WATCHLIST_ALERTS_TABLE}(
+                    session_id, code, condition, target_price, creator_id, creator_name, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                alert_rows,
+            )
+        conn.commit()
+
+
 def _save_watchlist(data: dict) -> None:
     try:
-        with open(_watchlist_file(), "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        _ensure_watchlist_tables()
+        _save_watchlist_to_tables(data if isinstance(data, dict) else {})
+        _mark_watchlist_migrated()
     except Exception as e:
         logger.error("保存自选数据失败: %s", e)
 

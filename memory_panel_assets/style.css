@@ -156,6 +156,32 @@ button:hover { transform: translateY(-1px); }
   padding: 14px;
 }
 
+.insight-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.insight-card {
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background: linear-gradient(145deg, rgba(255,255,255,0.88), rgba(246,238,228,0.82));
+  padding: 12px 14px;
+}
+
+.insight-card span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+
+.insight-card strong {
+  display: block;
+  font-size: 20px;
+}
+
 .stat-card strong {
   display: block;
   font-size: 28px;
@@ -354,6 +380,11 @@ button:hover { transform: translateY(-1px); }
   margin-bottom: 8px;
 }
 
+.timeline-body {
+  color: var(--text);
+  line-height: 1.6;
+}
+
 .graph-canvas {
   min-height: 320px;
   border-radius: 18px;
@@ -391,7 +422,8 @@ button:hover { transform: translateY(-1px); }
   .app-shell,
   .split-grid,
   .compact-grid,
-  .form-grid {
+  .form-grid,
+  .insight-grid {
     grid-template-columns: 1fr;
   }
 

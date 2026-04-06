@@ -23,9 +23,11 @@ from .qianfan_search_utils import (
     _get_qianfan_api_key,
     _increment_daily_count,
 )
+from .memory_state_store import load_json_state, save_json_state
 
 
 _SUBSCRIPTION_FILE_NAME = "email_subscriptions.json"
+_SUBSCRIPTION_STATE_NAMESPACE = "email_subscriptions"
 _LOCK = asyncio.Lock()
 _NEWS_SUBSCRIPTION_SMART_QUERY_TEMPLATE = (
     "今天是 {today}。\n"
@@ -46,11 +48,13 @@ def _get_subscription_file_path() -> Path:
 
 
 def _load_subscriptions() -> list[dict[str, Any]]:
-    path = _get_subscription_file_path()
-    if not path.exists():
-        return []
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = load_json_state(
+            _SUBSCRIPTION_STATE_NAMESPACE,
+            default={"subscriptions": []},
+            normalizer=lambda value: value if isinstance(value, dict) else {"subscriptions": []},
+            legacy_path=_get_subscription_file_path(),
+        )
         subs = data.get("subscriptions")
         return list(subs) if isinstance(subs, list) else []
     except Exception as e:
@@ -59,11 +63,7 @@ def _load_subscriptions() -> list[dict[str, Any]]:
 
 
 def _save_subscriptions(subscriptions: list[dict[str, Any]]) -> None:
-    path = _get_subscription_file_path()
-    path.write_text(
-        json.dumps({"subscriptions": subscriptions}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    save_json_state(_SUBSCRIPTION_STATE_NAMESPACE, {"subscriptions": subscriptions})
 
 
 def get_allowed_topics(config: AstrBotConfig) -> list[str]:

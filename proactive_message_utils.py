@@ -13,11 +13,14 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, StarTools
 
+from .memory_state_store import load_json_state, save_json_state
 from .memory_utils import get_memory_admin_qq_ids
 
 
 _TARGETS_FILE_NAME = "proactive_message_targets.json"
 _SCHEDULE_STATE_FILE_NAME = "proactive_message_schedule_state.json"
+_TARGETS_STATE_NAMESPACE = "proactive_message_targets"
+_SCHEDULE_STATE_NAMESPACE = "proactive_message_schedule_state"
 _TARGETS_LOCK = asyncio.Lock()
 _SCHEDULE_STATE_LOCK = asyncio.Lock()
 _DEFAULT_ADMIN_QQ_IDS: tuple[str, ...] = ()
@@ -184,13 +187,15 @@ def _atomic_write_json(path: Path, payload: Any) -> None:
 
 
 def _load_targets() -> list[dict[str, Any]]:
-    path = _targets_path()
-    if not path.exists():
-        return []
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = load_json_state(
+            _TARGETS_STATE_NAMESPACE,
+            default=[],
+            normalizer=lambda value: value if isinstance(value, list) else [],
+            legacy_path=_targets_path(),
+        )
     except Exception as exc:
-        logger.error("读取主动消息目标失败 %s: %s", path, exc)
+        logger.error("读取主动消息目标失败: %s", exc)
         return []
     if not isinstance(data, list):
         return []
@@ -199,7 +204,7 @@ def _load_targets() -> list[dict[str, Any]]:
 
 def _save_targets(records: list[dict[str, Any]]) -> None:
     try:
-        _atomic_write_json(_targets_path(), records)
+        save_json_state(_TARGETS_STATE_NAMESPACE, records)
     except Exception as exc:
         logger.error("保存主动消息目标失败: %s", exc)
         raise
@@ -617,13 +622,15 @@ def _build_template_values(
 
 
 def _load_schedule_state() -> dict[str, Any]:
-    path = _schedule_state_path()
-    if not path.exists():
-        return {"entries": []}
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = load_json_state(
+            _SCHEDULE_STATE_NAMESPACE,
+            default={"entries": []},
+            normalizer=lambda value: value if isinstance(value, dict) else {"entries": []},
+            legacy_path=_schedule_state_path(),
+        )
     except Exception as exc:
-        logger.error("读取主动消息定时状态失败 %s: %s", path, exc)
+        logger.error("读取主动消息定时状态失败: %s", exc)
         return {"entries": []}
     if not isinstance(data, dict):
         return {"entries": []}
@@ -636,7 +643,7 @@ def _load_schedule_state() -> dict[str, Any]:
 
 def _save_schedule_state(data: dict[str, Any]) -> None:
     try:
-        _atomic_write_json(_schedule_state_path(), data)
+        save_json_state(_SCHEDULE_STATE_NAMESPACE, data)
     except Exception as exc:
         logger.error("保存主动消息定时状态失败: %s", exc)
         raise

@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime
 
 from astrbot.api import AstrBotConfig, logger
@@ -33,6 +34,7 @@ from .weather_utils import (
     handle_weather_help,
 )
 from .bookkeeping_utils import (
+    get_bookkeeping_user_context,
     init_bookkeeping_module,
     handle_bookkeeping_expense,
     handle_bookkeeping_income,
@@ -93,6 +95,13 @@ from .memory_utils import (
 )
 from .passive_memory_utils import init_passive_memory_store
 from .memory_panel_utils import handle_memory_panel_command, maybe_autostart_memory_panel
+from .slang_utils import (
+    build_slang_prompt_for_event,
+    explain_slang_for_event,
+    handle_slang_command,
+    init_slang_store,
+    observe_slang_message,
+)
 from .proactive_message_utils import (
     configure_proactive_admin_qq_ids,
     handle_proactive_message_command,
@@ -184,6 +193,7 @@ def _compose_memory_prompt_with_budget(named_parts: list[tuple[str, str]], max_c
     part_caps = {
         "memory_prompt": 700,
         "passive_profile_prompt": 450,
+        "slang_prompt": 260,
         "event_recall_prompt": 320,
         "related_prompt": 320,
         "reminiscence_prompt": 520,
@@ -277,6 +287,7 @@ class AllCharPlugin(Star):
             getattr(self.config, "memory_related_memory_cache_ttl_seconds", 60)
         )
         init_passive_memory_store()
+        init_slang_store()
         maybe_autostart_memory_panel(self.context, self.config)
 
         # 注册一批可供 Agent 自动调用的工具（类似 astrbot_plugin_payqr）
@@ -293,10 +304,11 @@ class AllCharPlugin(Star):
                 AnimeTraceTool(),
                 MusicPlayTool(),
                 SendEmailTool(),
+                SlangExplainTool(),
                 ProactiveSendMessageTool(),
             )
             logger.info(
-                "astrbot_all_char 已注册 LLM 工具：股票、天气、火车票、提醒、记账、智能搜索/网页搜索、动漫识别、点歌、发邮件、主动消息等"
+                "astrbot_all_char 已注册 LLM 工具：股票、天气、火车票、提醒、记账、智能搜索/网页搜索、动漫识别、点歌、发邮件、黑话解释、主动消息等"
             )
         except Exception as e:
             logger.error("astrbot_all_char 注册 LLM 工具失败: %s", e)
@@ -376,6 +388,11 @@ class AllCharPlugin(Star):
     @filter.command("记忆面板", alias={"memory_panel", "记忆管理"})
     async def cmd_memory_panel(self, event: AstrMessageEvent):
         async for result in handle_memory_panel_command(event, self.context, self.config):
+            yield result
+
+    @filter.command("黑话", alias={"黑话词典", "群黑话"})
+    async def cmd_slang(self, event: AstrMessageEvent):
+        async for result in handle_slang_command(event, self.config):
             yield result
 
     # ---------------- 股票 ----------------
@@ -583,6 +600,7 @@ class AllCharPlugin(Star):
         except Exception:
             message_text = ""
         passive_store.observe_message(event)
+        await observe_slang_message(self.context, event, self.config)
 
         memory_prompt_max_chars = _to_int_in_range(
             getattr(self.config, "memory_prompt_max_chars", 1800),
@@ -599,6 +617,7 @@ class AllCharPlugin(Star):
 
         memory_prompt = store.build_prompt_for_event(event)
         passive_profile_prompt = passive_store.build_profile_prompt(event)
+        slang_prompt = build_slang_prompt_for_event(event, message_text, self.config)
         event_recall_enabled = bool(getattr(self.config, "memory_event_recall_enabled", True))
         event_recall_prompt = (
             passive_store.build_event_recall_prompt(
@@ -631,6 +650,7 @@ class AllCharPlugin(Star):
         named_parts = [
             ("memory_prompt", memory_prompt),
             ("passive_profile_prompt", passive_profile_prompt),
+            ("slang_prompt", slang_prompt),
             ("event_recall_prompt", event_recall_prompt),
             ("related_prompt", related_prompt),
             ("reminiscence_prompt", reminiscence_prompt),
@@ -1007,6 +1027,15 @@ class AllCharPlugin(Star):
         result = await tool.call(ctx_wrapper, to_addr=to_addr, subject=subject, body=body)
         yield event.plain_result(str(result))
 
+    @filter.llm_tool(name="slang_explain")
+    async def tool_slang_explain(self, event: AstrMessageEvent, term: str):
+        """解释当前群聊/当前私聊里的一条黑话。
+
+        Args:
+            term(string): 要查询的黑话词条，例如 yyds。
+        """
+        yield event.plain_result(explain_slang_for_event(event, term))
+
 
 @dataclass
 class StockQueryTool(FunctionTool[AstrAgentContext]):
@@ -1347,7 +1376,7 @@ class BookkeepingAddExpenseTool(FunctionTool[AstrAgentContext]):
         desc = (description or "").strip()
 
         module = init_bookkeeping_module(ctx, cfg)
-        user_name = event.get_sender_name() if hasattr(event, "get_sender_name") else "用户"
+        user_key, user_name = get_bookkeeping_user_context(event)
         umo = getattr(event, "unified_msg_origin", "")
 
         category = await module._ai_classify_category(  # type: ignore[attr-defined]
@@ -1357,11 +1386,12 @@ class BookkeepingAddExpenseTool(FunctionTool[AstrAgentContext]):
             umo,
         )
         await module._save_record(  # type: ignore[attr-defined]
-            user_name,
+            user_key,
             "expense",
             category,
             amt,
             desc,
+            legacy_names=(user_name,),
         )
 
         response = (
@@ -1422,7 +1452,7 @@ class BookkeepingAddIncomeTool(FunctionTool[AstrAgentContext]):
         desc = (description or "").strip()
 
         module = init_bookkeeping_module(ctx, cfg)
-        user_name = event.get_sender_name() if hasattr(event, "get_sender_name") else "用户"
+        user_key, user_name = get_bookkeeping_user_context(event)
         umo = getattr(event, "unified_msg_origin", "")
 
         category = await module._ai_classify_category(  # type: ignore[attr-defined]
@@ -1432,11 +1462,12 @@ class BookkeepingAddIncomeTool(FunctionTool[AstrAgentContext]):
             umo,
         )
         await module._save_record(  # type: ignore[attr-defined]
-            user_name,
+            user_key,
             "income",
             category,
             amt,
             desc,
+            legacy_names=(user_name,),
         )
 
         response = (
@@ -1477,8 +1508,8 @@ class BookkeepingSummaryTool(FunctionTool[AstrAgentContext]):
         cfg = _get_effective_config(ctx, AllCharPlugin._shared_config)  # type: ignore[arg-type]
 
         module = init_bookkeeping_module(ctx, cfg)
-        user_name = event.get_sender_name() if hasattr(event, "get_sender_name") else "用户"
-        records = module._load_records(user_name)  # type: ignore[attr-defined]
+        user_key, user_name = get_bookkeeping_user_context(event)
+        records = module._load_records(user_key, legacy_names=(user_name,))  # type: ignore[attr-defined]
         if not records:
             return "📊 您还没有记账数据。"
 
@@ -1800,7 +1831,8 @@ class SendEmailTool(FunctionTool[AstrAgentContext]):
         to_addr = (to_addr or "").strip()
         if not to_addr:
             return "请提供收件人邮箱地址。"
-        ok, msg = send_email_sync(
+        ok, msg = await asyncio.to_thread(
+            send_email_sync,
             sender=sender,
             auth_code=auth_code,
             to_addrs=[to_addr],
@@ -1810,6 +1842,43 @@ class SendEmailTool(FunctionTool[AstrAgentContext]):
             smtp_port=int(get_email_config(cfg, "email_smtp_port", "465") or "465"),
         )
         return msg
+
+
+@dataclass
+class SlangExplainTool(FunctionTool[AstrAgentContext]):
+    """
+    解释当前群聊或私聊上下文中的黑话。
+    """
+
+    name: str = "slang_explain"
+    description: str = (
+        "查询当前群聊/当前私聊里某个黑话、缩写或特殊说法的意思。"
+        "适合用户问“xx 是什么意思”“这个梗啥意思”时调用。"
+    )
+    parameters: dict = Field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "term": {
+                    "type": "string",
+                    "description": "要解释的黑话词条，例如 yyds、绝绝子。",
+                },
+            },
+            "required": ["term"],
+        }
+    )
+
+    async def call(
+        self,
+        context: ContextWrapper[AstrAgentContext],
+        term: str,
+        **kwargs,
+    ) -> ToolExecResult:
+        del kwargs
+        event = context.context.event
+        if event is None:
+            return "当前没有事件上下文，暂时无法判断要查哪个群或私聊的黑话。"
+        return explain_slang_for_event(event, (term or "").strip())
 
 
 @dataclass

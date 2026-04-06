@@ -4,9 +4,10 @@ import asyncio
 import json
 import random
 import re
+import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from uuid import uuid4
 
 from astrbot.api import AstrBotConfig, logger
@@ -14,11 +15,18 @@ from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.message_components import At
 from astrbot.api.star import Context, StarTools
 
+from .memory_state_store import delete_json_state, load_json_state, save_json_state, shared_conn
 from .passive_memory_utils import record_passive_habit
 
 
 _REMINDER_FILE_NAME = "simple_reminders.json"
 _REMINDER_HISTORY_FILE_NAME = "simple_reminders_history.json"
+_REMINDER_STATE_NAMESPACE = "simple_reminders"
+_REMINDER_HISTORY_STATE_NAMESPACE = "simple_reminders_history"
+_REMINDER_MIGRATION_NAMESPACE = "simple_reminders_migrated"
+_REMINDER_HISTORY_MIGRATION_NAMESPACE = "simple_reminders_history_migrated"
+_REMINDER_TABLE = "simple_reminders"
+_REMINDER_HISTORY_TABLE = "simple_reminder_history"
 _REMINDER_LOCK = asyncio.Lock()
 _MAX_SEND_RETRY = 5
 
@@ -265,13 +273,431 @@ def _load_json_list(path: Path) -> list[dict]:
         return []
 
 
+def _ensure_reminder_tables() -> None:
+    with shared_conn() as conn:
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {_REMINDER_TABLE} (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                creator_id TEXT NOT NULL DEFAULT '',
+                creator_name TEXT NOT NULL DEFAULT '',
+                text TEXT NOT NULL,
+                run_at TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL,
+                last_attempt_at TEXT NOT NULL DEFAULT '',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT NOT NULL DEFAULT '',
+                finished_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_{_REMINDER_TABLE}_pending "
+            f"ON {_REMINDER_TABLE}(status, run_at, session_id)"
+        )
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {_REMINDER_HISTORY_TABLE} (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                creator_id TEXT NOT NULL DEFAULT '',
+                creator_name TEXT NOT NULL DEFAULT '',
+                text TEXT NOT NULL,
+                run_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                last_attempt_at TEXT NOT NULL DEFAULT '',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT NOT NULL DEFAULT '',
+                finished_at TEXT NOT NULL DEFAULT '',
+                archived_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_{_REMINDER_HISTORY_TABLE}_session "
+            f"ON {_REMINDER_HISTORY_TABLE}(session_id, archived_at DESC)"
+        )
+        conn.commit()
+
+
+def _normalize_reminder_record(item: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(item, dict):
+        return None
+    reminder_id = str(item.get("id") or "").strip() or uuid4().hex
+    session_id = str(item.get("session_id") or "").strip()
+    text = str(item.get("text") or "").strip()
+    run_at = str(item.get("run_at") or "").strip()
+    if not session_id or not text or not run_at:
+        return None
+    try:
+        attempts = int(item.get("attempts", 0) or 0)
+    except Exception:
+        attempts = 0
+    status = str(item.get("status") or "pending").strip() or "pending"
+    created_at = str(item.get("created_at") or "").strip() or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return {
+        "id": reminder_id,
+        "session_id": session_id,
+        "creator_id": str(item.get("creator_id") or "").strip(),
+        "creator_name": str(item.get("creator_name") or "").strip(),
+        "text": text,
+        "run_at": run_at,
+        "status": status,
+        "created_at": created_at,
+        "last_attempt_at": str(item.get("last_attempt_at") or "").strip(),
+        "attempts": max(0, attempts),
+        "last_error": str(item.get("last_error") or "").strip(),
+        "finished_at": str(item.get("finished_at") or "").strip(),
+    }
+
+
+def _row_to_reminder(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": str(row["id"]),
+        "session_id": str(row["session_id"]),
+        "creator_id": str(row["creator_id"] or ""),
+        "creator_name": str(row["creator_name"] or ""),
+        "text": str(row["text"]),
+        "run_at": str(row["run_at"]),
+        "status": str(row["status"]),
+        "created_at": str(row["created_at"]),
+        "last_attempt_at": str(row["last_attempt_at"] or ""),
+        "attempts": int(row["attempts"] or 0),
+        "last_error": str(row["last_error"] or ""),
+        "finished_at": str(row["finished_at"] or ""),
+    }
+
+
+def _row_to_reminder_history(row: sqlite3.Row) -> dict[str, Any]:
+    record = _row_to_reminder(row)
+    record["archived_at"] = str(row["archived_at"] or "")
+    return record
+
+
+def ensure_simple_reminder_storage() -> None:
+    _ensure_reminder_data_migrated()
+
+
+def list_simple_reminders_for_creator(
+    creator_id: str,
+    *,
+    pending_limit: int = 100,
+    history_limit: int = 100,
+) -> dict[str, list[dict[str, Any]]]:
+    ensure_simple_reminder_storage()
+    cleaned_creator = str(creator_id or "").strip()
+    if not cleaned_creator:
+        return {"pending": [], "history": []}
+    with shared_conn() as conn:
+        pending_rows = conn.execute(
+            f"""
+            SELECT id, session_id, creator_id, creator_name, text, run_at, status,
+                   created_at, last_attempt_at, attempts, last_error, finished_at
+            FROM {_REMINDER_TABLE}
+            WHERE creator_id = ?
+            ORDER BY run_at ASC, created_at ASC, id ASC
+            LIMIT ?
+            """,
+            (cleaned_creator, max(1, int(pending_limit))),
+        ).fetchall()
+        history_rows = conn.execute(
+            f"""
+            SELECT id, session_id, creator_id, creator_name, text, run_at, status,
+                   created_at, last_attempt_at, attempts, last_error, finished_at, archived_at
+            FROM {_REMINDER_HISTORY_TABLE}
+            WHERE creator_id = ?
+            ORDER BY archived_at DESC, finished_at DESC, id DESC
+            LIMIT ?
+            """,
+            (cleaned_creator, max(1, int(history_limit))),
+        ).fetchall()
+    return {
+        "pending": [_row_to_reminder(row) for row in pending_rows],
+        "history": [_row_to_reminder_history(row) for row in history_rows],
+    }
+
+
+def get_simple_reminder_counts_by_creator() -> dict[str, int]:
+    ensure_simple_reminder_storage()
+    counts: dict[str, int] = {}
+    with shared_conn() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT creator_id, COUNT(*) AS total
+            FROM {_REMINDER_TABLE}
+            WHERE creator_id <> ''
+            GROUP BY creator_id
+            """
+        ).fetchall()
+    for row in rows:
+        creator_id = str(row["creator_id"] or "").strip()
+        if creator_id:
+            counts[creator_id] = int(row["total"] or 0)
+    return counts
+
+
+def create_simple_reminder_for_creator(
+    creator_id: str,
+    *,
+    creator_name: str,
+    session_id: str,
+    text: str,
+    run_at: str,
+) -> dict[str, Any] | None:
+    ensure_simple_reminder_storage()
+    cleaned_creator = str(creator_id or "").strip()
+    cleaned_session = str(session_id or "").strip()
+    cleaned_text = str(text or "").strip()
+    cleaned_creator_name = str(creator_name or "").strip()
+    cleaned_run_at = str(run_at or "").strip()
+    if not cleaned_creator or not cleaned_session or not cleaned_text or not cleaned_run_at:
+        return None
+    try:
+        normalized_run_at = datetime.strptime(cleaned_run_at, "%Y-%m-%d %H:%M:%S").strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    record = {
+        "id": uuid4().hex,
+        "session_id": cleaned_session,
+        "creator_id": cleaned_creator,
+        "creator_name": cleaned_creator_name,
+        "text": cleaned_text,
+        "run_at": normalized_run_at,
+        "status": "pending",
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "last_attempt_at": "",
+        "attempts": 0,
+        "last_error": "",
+        "finished_at": "",
+    }
+    _insert_reminders([record], history=False)
+    return record
+
+
+def update_simple_reminder_for_creator(
+    reminder_id: str,
+    creator_id: str,
+    *,
+    session_id: str,
+    text: str,
+    run_at: str,
+) -> dict[str, Any] | None:
+    ensure_simple_reminder_storage()
+    cleaned_id = str(reminder_id or "").strip()
+    cleaned_creator = str(creator_id or "").strip()
+    cleaned_session = str(session_id or "").strip()
+    cleaned_text = str(text or "").strip()
+    cleaned_run_at = str(run_at or "").strip()
+    if not cleaned_id or not cleaned_creator or not cleaned_session or not cleaned_text or not cleaned_run_at:
+        return None
+    try:
+        normalized_run_at = datetime.strptime(cleaned_run_at, "%Y-%m-%d %H:%M:%S").strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    with shared_conn() as conn:
+        existing = conn.execute(
+            f"""
+            SELECT id, session_id, creator_id, creator_name, text, run_at, status,
+                   created_at, last_attempt_at, attempts, last_error, finished_at
+            FROM {_REMINDER_TABLE}
+            WHERE id = ? AND creator_id = ?
+            """,
+            (cleaned_id, cleaned_creator),
+        ).fetchone()
+        if existing is None:
+            return None
+        conn.execute(
+            f"""
+            UPDATE {_REMINDER_TABLE}
+            SET session_id = ?, text = ?, run_at = ?
+            WHERE id = ? AND creator_id = ?
+            """,
+            (cleaned_session, cleaned_text, normalized_run_at, cleaned_id, cleaned_creator),
+        )
+        row = conn.execute(
+            f"""
+            SELECT id, session_id, creator_id, creator_name, text, run_at, status,
+                   created_at, last_attempt_at, attempts, last_error, finished_at
+            FROM {_REMINDER_TABLE}
+            WHERE id = ? AND creator_id = ?
+            """,
+            (cleaned_id, cleaned_creator),
+        ).fetchone()
+        conn.commit()
+    return _row_to_reminder(row) if row is not None else None
+
+
+def delete_simple_reminder_for_creator(reminder_id: str, creator_id: str) -> bool:
+    ensure_simple_reminder_storage()
+    cleaned_id = str(reminder_id or "").strip()
+    cleaned_creator = str(creator_id or "").strip()
+    if not cleaned_id or not cleaned_creator:
+        return False
+    with shared_conn() as conn:
+        pending_cursor = conn.execute(
+            f"DELETE FROM {_REMINDER_TABLE} WHERE id = ? AND creator_id = ?",
+            (cleaned_id, cleaned_creator),
+        )
+        history_cursor = conn.execute(
+            f"DELETE FROM {_REMINDER_HISTORY_TABLE} WHERE id = ? AND creator_id = ?",
+            (cleaned_id, cleaned_creator),
+        )
+        deleted = pending_cursor.rowcount > 0 or history_cursor.rowcount > 0
+        conn.commit()
+    return deleted
+
+
+def _is_migrated(namespace: str) -> bool:
+    return bool(
+        load_json_state(
+            namespace,
+            default=False,
+            normalizer=lambda value: bool(value),
+        )
+    )
+
+
+def _mark_migrated(namespace: str) -> None:
+    save_json_state(namespace, True)
+
+
+def _insert_reminders(records: list[dict[str, Any]], *, history: bool) -> None:
+    normalized = [item for item in (_normalize_reminder_record(r) for r in records) if item is not None]
+    if not normalized:
+        return
+    table_name = _REMINDER_HISTORY_TABLE if history else _REMINDER_TABLE
+    with shared_conn() as conn:
+        if history:
+            conn.executemany(
+                f"""
+                INSERT OR REPLACE INTO {table_name}(
+                    id, session_id, creator_id, creator_name, text, run_at, status,
+                    created_at, last_attempt_at, attempts, last_error, finished_at, archived_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        item["id"],
+                        item["session_id"],
+                        item["creator_id"],
+                        item["creator_name"],
+                        item["text"],
+                        item["run_at"],
+                        item["status"],
+                        item["created_at"],
+                        item["last_attempt_at"],
+                        item["attempts"],
+                        item["last_error"],
+                        item["finished_at"],
+                        item["finished_at"] or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    )
+                    for item in normalized
+                ],
+            )
+        else:
+            conn.executemany(
+                f"""
+                INSERT OR REPLACE INTO {table_name}(
+                    id, session_id, creator_id, creator_name, text, run_at, status,
+                    created_at, last_attempt_at, attempts, last_error, finished_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        item["id"],
+                        item["session_id"],
+                        item["creator_id"],
+                        item["creator_name"],
+                        item["text"],
+                        item["run_at"],
+                        item["status"],
+                        item["created_at"],
+                        item["last_attempt_at"],
+                        item["attempts"],
+                        item["last_error"],
+                        item["finished_at"],
+                    )
+                    for item in normalized
+                ],
+            )
+        conn.commit()
+
+
+def _ensure_reminder_data_migrated() -> None:
+    _ensure_reminder_tables()
+    if not _is_migrated(_REMINDER_MIGRATION_NAMESPACE):
+        legacy_pending = load_json_state(
+            _REMINDER_STATE_NAMESPACE,
+            default=[],
+            normalizer=lambda value: value if isinstance(value, list) else [],
+            legacy_path=_get_reminder_file_path(),
+        )
+        _insert_reminders(list(legacy_pending), history=False)
+        _mark_migrated(_REMINDER_MIGRATION_NAMESPACE)
+        delete_json_state(_REMINDER_STATE_NAMESPACE)
+
+    if not _is_migrated(_REMINDER_HISTORY_MIGRATION_NAMESPACE):
+        legacy_history = load_json_state(
+            _REMINDER_HISTORY_STATE_NAMESPACE,
+            default=[],
+            normalizer=lambda value: value if isinstance(value, list) else [],
+            legacy_path=_get_reminder_history_file_path(),
+        )
+        _insert_reminders(list(legacy_history), history=True)
+        _mark_migrated(_REMINDER_HISTORY_MIGRATION_NAMESPACE)
+        delete_json_state(_REMINDER_HISTORY_STATE_NAMESPACE)
+
+
 def _load_all_reminders() -> list[dict]:
-    return _load_json_list(_get_reminder_file_path())
+    _ensure_reminder_data_migrated()
+    with shared_conn() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT id, session_id, creator_id, creator_name, text, run_at, status,
+                   created_at, last_attempt_at, attempts, last_error, finished_at
+            FROM {_REMINDER_TABLE}
+            ORDER BY run_at ASC, created_at ASC, id ASC
+            """
+        ).fetchall()
+    return [_row_to_reminder(row) for row in rows]
 
 
 def _save_all_reminders(reminders: list[dict]) -> None:
     try:
-        _atomic_write_json(_get_reminder_file_path(), reminders)
+        _ensure_reminder_data_migrated()
+        normalized = [item for item in (_normalize_reminder_record(r) for r in reminders) if item is not None]
+        with shared_conn() as conn:
+            conn.execute(f"DELETE FROM {_REMINDER_TABLE}")
+            if normalized:
+                conn.executemany(
+                    f"""
+                    INSERT INTO {_REMINDER_TABLE}(
+                        id, session_id, creator_id, creator_name, text, run_at, status,
+                        created_at, last_attempt_at, attempts, last_error, finished_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            item["id"],
+                            item["session_id"],
+                            item["creator_id"],
+                            item["creator_name"],
+                            item["text"],
+                            item["run_at"],
+                            item["status"],
+                            item["created_at"],
+                            item["last_attempt_at"],
+                            item["attempts"],
+                            item["last_error"],
+                            item["finished_at"],
+                        )
+                        for item in normalized
+                    ],
+                )
+            conn.commit()
     except Exception as e:
         logger.error("保存提醒数据失败: %s", e)
 
@@ -301,10 +727,8 @@ def _append_reminder_history(record: dict) -> None:
     将已触发提醒写入历史归档，满足“长期持久化”诉求。
     """
     try:
-        history_path = _get_reminder_history_file_path()
-        history = _load_json_list(history_path)
-        history.append(record)
-        _atomic_write_json(history_path, history)
+        _ensure_reminder_data_migrated()
+        _insert_reminders([record], history=True)
     except Exception as e:
         logger.error("保存提醒历史失败: %s", e)
 
@@ -404,9 +828,8 @@ class _SimpleReminderCenter:
         }
 
         async with _REMINDER_LOCK:
-            reminders = _load_all_reminders()
-            reminders.append(record)
-            _save_all_reminders(reminders)
+            _ensure_reminder_data_migrated()
+            _insert_reminders([record], history=False)
 
     async def _run_due_reminders(self) -> None:
         """定时扫描待提醒列表，触发到期提醒。"""

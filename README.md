@@ -1,6 +1,6 @@
 # 多功能生活助手（astrbot_all_char）
 
-`astrbot_all_char` 是原 char 系列多个热门插件的整合版：**一套插件**覆盖火车票、天气、股票、简易提醒、主动消息、记账、千帆智能/网页搜索、点歌、今日运势、OCR、动漫识别、发邮件等高频需求，**统一配置、统一指令、统一维护**。
+`astrbot_all_char` 是原 char 系列多个热门插件的整合版：**一套插件**覆盖火车票、天气、股票、简易提醒、主动消息、记账、千帆智能/网页搜索、点歌、今日运势、OCR、动漫识别、发邮件、群聊黑话学习等高频需求，**统一配置、统一指令、统一维护**。
 
 - **命令模式**：所有功能均通过明确的前缀指令调用（见下方「所有指令一览」）。
 - **口语化 / Agent 调用**：插件注册了一组 LLM 工具（FunctionTool），在自然语言对话中由 Agent 自动选择并调用，无需记命令（见「口语化调用」与「已注册的 LLM 工具一览」）。
@@ -49,6 +49,19 @@
 
 ---
 
+## 群聊黑话学习
+
+- 黑话默认按**当前群聊 / 当前私聊 / 当前会话**隔离存储，尽量避免不同地方的叫法串味。
+- 普通聊天进入默认大模型前，会先从消息里尝试学习类似「`yyds 就是 永远的神`」「`绝绝子 = 非常厉害`」这类明确解释句；规则没命中时，还会让**当前会话模型**对更自然的解释句做一次保守抽取。
+- 只有当前消息真的提到了黑话，或者明显在问「什么意思 / 这个梗啥意思」时，才会把相关解释注入给 bot，避免提示词被词典塞满。
+- 常用命令：
+  - `/黑话 列表`
+  - `/黑话 解释 yyds`
+  - `/黑话 学习 yyds = 永远的神`
+  - `/黑话 删除 yyds`
+
+---
+
 ## 一、所有指令一览
 
 | 模块 | 主命令及别名 | 用法示例 |
@@ -57,6 +70,7 @@
 | **简易提醒** | `/提醒`、`/提醒列表`、`/我的提醒` | `/提醒 3分钟后 喝水`、`/提醒 08:30 上班打卡`、`/提醒 列表` |
 | **主动消息** | `/主动消息`、`/主动发送`、`/主动推送` | 推荐直接在 `proactive` 配置里填写 `proactive_private_qq_ids`、`proactive_group_ids`、`proactive_time_slots`；兼容命令绑定：`/主动消息 绑定 工作群`，发送：`/主动消息 发送 群 工作群 今天 18:00 开会` |
 | **永久记忆** | `/记忆`、`/认人`、`/我是谁` | `/认人 123456789 张三 初中同学`、`/记忆 设置 123456789 老张`、`/记忆 删除别名 123456789 老张` |
+| **群聊黑话** | `/黑话`、`/黑话词典`、`/群黑话` | `/黑话 列表`、`/黑话 解释 yyds`、`/黑话 学习 yyds = 永远的神` |
 | **定时任务** | `/rmd`、`/rmdg` | 兼容原 sy 插件子命令，详见帮助 |
 | **股票** | `/股票`、`/stock`、`/自选股`、`/行情` | 查询：`/股票 查询 600519`、`/股票 查询 贵州茅台`；自选：`/股票 添加 600519`、`/股票 删除 600519`、`/股票 列表`；提醒：`/股票 提醒 09:30`、`/股票 跌到 600519 1800`、`/股票 涨到 600519 2000`；分析：`/股票 智能分析 600519`、`/股票 量化分析 600519` |
 | **基金/量化分析** | 主入口：`/基金`；子命令：`搜索`、`设置`、`分析`、`历史`、`对比`、`量化`、`智能`、`博弈` | `/基金 161226`、`/基金 分析 161226`、`/基金 量化 161226`、`/基金 博弈 161226` |
@@ -91,6 +105,7 @@
 | 记一笔收入 | 「今天发工资 5000」「收到红包 200 记一下」 | `bookkeeping_add_income` |
 | 看账本 | 「我最近花了多少钱」「帮我看看账本总体情况」 | `bookkeeping_summary` |
 | 上网查资料 | 「查一下最新的某某新闻」「帮我搜一下某某」 | `smart_search` / `web_search` |
+| 问群里黑话 | 「yyds 在我们群里是什么意思」「这个梗啥意思」 | `slang_explain` |
 | 识番/识角色 | 「这张图是哪个番」「这是谁」（并带图） | `anime_trace` |
 | 点歌 | 「放一首青花」「帮我点一首夜曲 周杰伦」 | `music_play` |
 | 发邮件 | 「帮我发封邮件给 xxx@qq.com，主题是…内容是…」 | `send_email` |
@@ -136,6 +151,11 @@
   - 功能：查看当前用户记账总收入、总支出、余额及简要 AI 财务建议。  
   - 参数：无。
 
+- **slang_explain**
+  - 功能：解释当前群聊 / 当前私聊里某个黑话、梗或特殊说法的意思。
+  - 参数：`term`（必填，string）— 要查询的词条，如 `yyds`。
+  - 说明：黑话按当前会话隔离存储；若 bot 已在这个群或私聊里学过该词，会返回对应解释、可信度和证据次数。
+
 - **smart_search**  
   - 功能：百度千帆智能搜索（ai_search/chat/completions），结果交由当前会话 LLM 整理输出。  
   - 参数：`query`（必填，string）。  
@@ -172,6 +192,7 @@
 | 火车票 | `/火车票 厦门 上海` | `train_query` |
 | 简易提醒 | `/提醒 3分钟后 喝水` | `simple_reminder` |
 | 记账支出/收入/统计 | `记账支出 35 午饭`、`查账统计` | `bookkeeping_add_expense` / `bookkeeping_add_income` / `bookkeeping_summary` |
+| 群聊黑话 | `/黑话 解释 yyds` | `slang_explain` |
 | 点歌 | `/点歌 青花` | `music_play` |
 | 智能/网页搜索 | `/智能搜索 …`、`/搜索 …` | `smart_search`、`web_search` |
 | 动漫识别 | `/搜番`（带图） | `anime_trace` |
@@ -210,6 +231,7 @@
   > - `simple_reminder`：帮用户设置定时提醒  
   > - `proactive_send_message`：向已绑定的群聊/私聊目标主动发送消息（仅管理员）  
   > - `bookkeeping_add_expense` / `bookkeeping_add_income` / `bookkeeping_summary`：记账与查统计  
+  > - `slang_explain`：解释当前群聊/当前私聊里的黑话、梗或特殊说法  
   > - `smart_search` / `web_search`：需要联网查资料时调用  
   > - `anime_trace`：用户发动漫截图并问「这是谁/出自哪部番」时调用  
   > - `music_play`：用户要点歌、放歌时调用  
@@ -236,6 +258,7 @@
 - 千帆：`/智能搜索`（ai_search 对话）、`/搜索`（web_search + 当前 LLM 整理）
 - 动漫识别：AnimeTrace API
 - 发邮件：QQ 邮箱 SMTP
+- 群聊黑话学习：当前仓库自有实现，按会话隔离存储与注入解释
 
 本插件**不**对「非 `/` 开头」的普通消息做意图识别；所有功能通过**命令**或 **Agent 内 LLM 工具**调用，便于与 MCP 等指令/工具体系集成。
 
@@ -251,10 +274,11 @@
 ### 目录与代码结构
 
 - `main.py`：插件元信息、指令路由注册、LLM 工具注册，业务逻辑下沉到 utils。
-- `train_utils.py`、`sy_scheduler_utils.py`、`stock_utils.py`、`fund_analysis_utils.py`、`weather_utils.py`、`epic_utils.py`、`bookkeeping_utils.py`、`jrys_utils.py`、`ocr_utils.py`、`qianfan_search_utils.py`、`music_utils.py`、`anime_utils.py`、`email_utils.py`、`memory_utils.py`、`passive_memory_utils.py`、`proactive_message_utils.py`：各功能实现。
+- `train_utils.py`、`sy_scheduler_utils.py`、`stock_utils.py`、`fund_analysis_utils.py`、`weather_utils.py`、`epic_utils.py`、`bookkeeping_utils.py`、`jrys_utils.py`、`ocr_utils.py`、`qianfan_search_utils.py`、`music_utils.py`、`anime_utils.py`、`email_utils.py`、`memory_utils.py`、`passive_memory_utils.py`、`slang_utils.py`、`proactive_message_utils.py`：各功能实现。
 - `fund_analyzer/`、`fund_stock/`、`eastmoney_api.py`：基金/量化分析与多智能体博弈分析的底层模块。
 - `memory_utils.py`：基于 SQLite 的 QQ 长期记忆层，支持旧版 JSON 自动迁移、管理员管理、多别名绑定，并在普通聊天进入 LLM 前自动注入当前用户记忆。
 - `passive_memory_utils.py`：被动记忆增强层，负责从自然聊天中抽取偏好/关系、从功能使用中沉淀习惯，并把人物身份与 APLR 事件回忆做联动注入。
+- `slang_utils.py`：群聊黑话词典层，负责从明确解释句中保守学习黑话，并在相关消息出现时向 LLM 注入当前会话的解释。
 - 基金相关能力现已支持直接通过 `/基金` 调用，原 `/股票` 下的基金子命令保留兼容。
 - 股票行情与股票名称搜索已切到 `akshare` 路径；`/股票 搜索股票`、`/股票 查询`、自选股列表与提醒均通过这一链路取数，依赖 `akshare` 与 `pandas`。
 - `/基金 智能`、`/基金 博弈` 以及兼容的 `/股票 智能分析`、`/股票 股票智能分析` 依赖已配置的大模型提供商。
@@ -266,7 +290,7 @@
 
 ### 配置统一（_conf_schema.json）
 
-- 仅保留一个 `_conf_schema.json`，按模块分组：`train`、`sy`、`stock`、`weather`、`memory`、`proactive`、`epic`、`jrys`、`ocr`、`qianfan_search`、`music`、邮件等。
+- 仅保留一个 `_conf_schema.json`，按模块分组：`train`、`sy`、`stock`、`weather`、`memory`、`slang`、`proactive`、`epic`、`jrys`、`ocr`、`qianfan_search`、`music`、邮件等。
 - 字段使用模块前缀（如 `train_`、`weather_`），详见同目录 `_conf_schema.json`。
 - 今日运势资源：将原 jrys 插件的 `backgroundFolder` 与 `font` 拷贝到 `astrbot_all_char/jrys_assets/` 下。
 

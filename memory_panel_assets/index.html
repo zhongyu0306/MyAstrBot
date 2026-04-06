@@ -143,6 +143,44 @@
           </form>
         </section>
 
+        <section class="split-grid">
+          <section class="panel">
+            <div class="section-title"><span>账本记录</span></div>
+            <div id="bookkeeping-summary" class="insight-grid"></div>
+            <div id="bookkeeping-list" class="editable-list"></div>
+            <form id="bookkeeping-form" class="form-grid compact-grid">
+              <label>类型
+                <select id="bookkeeping-type-select" name="record_type"></select>
+              </label>
+              <label>分类<input name="category" type="text" placeholder="例如：餐饮 / 工资 / 购物"></label>
+              <label>金额<input name="amount" type="number" step="0.01" min="0" placeholder="例如：88.50"></label>
+              <label>记录时间<input name="created_at" type="text" placeholder="YYYY-MM-DD HH:MM:SS"></label>
+              <label class="wide">备注<input name="description" type="text" placeholder="可选，补充说明这条账单"></label>
+              <div class="form-actions wide">
+                <button type="submit" class="primary-btn">新增账本记录</button>
+              </div>
+            </form>
+          </section>
+
+          <section class="panel">
+            <div class="section-title"><span>提醒管理</span></div>
+            <div id="reminder-summary" class="insight-grid"></div>
+            <div class="section-title"><span>待执行提醒</span></div>
+            <div id="reminders-list" class="editable-list"></div>
+            <form id="reminder-form" class="form-grid compact-grid">
+              <label>会话 ID<input name="session_id" type="text" placeholder="用于投递提醒的 unified_msg_origin"></label>
+              <label>触发时间<input name="run_at" type="text" placeholder="YYYY-MM-DD HH:MM:SS"></label>
+              <label class="wide">提醒内容<input name="text" type="text" placeholder="例如：提醒我开会 / 喝水 / 看盘"></label>
+              <div class="form-actions wide">
+                <button type="submit" class="primary-btn">新增提醒</button>
+              </div>
+            </form>
+
+            <div class="section-title"><span>提醒历史</span></div>
+            <div id="reminder-history-list" class="timeline-list"></div>
+          </section>
+        </section>
+
         <section class="panel">
           <div class="section-title"><span>事件回忆</span></div>
           <div id="events-list" class="timeline-list"></div>
