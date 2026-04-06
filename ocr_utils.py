@@ -2,6 +2,7 @@
 
 import base64
 import re
+import uuid
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -9,6 +10,8 @@ import aiohttp
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent
+
+from .config_utils import ensure_flat_config
 
 OCR_PROMPT = "请识别并完整、准确地提取图片中的所有文字（OCR）。只输出图片中的文字内容，不要解释、不要加前后缀。若图中无文字则回复「图中未识别到文字」。"
 
@@ -198,11 +201,59 @@ async def _call_openai_vision(
     return None
 
 
-async def handle_ocr_command(event: AstrMessageEvent, config: AstrBotConfig) -> AsyncIterator[Any]:
+def _get_selected_provider(config: AstrBotConfig, context: Any | None) -> tuple[str, Any | None]:
+    runtime_config = ensure_flat_config(config)
+    provider_id = str(getattr(runtime_config, "ocr_provider_id", "") or "").strip()
+    if not provider_id or context is None:
+        return provider_id, None
+
+    getter = getattr(context, "get_provider_by_id", None)
+    if not callable(getter):
+        return provider_id, None
+
+    try:
+        return provider_id, getter(provider_id)
+    except Exception as exc:
+        logger.warning("OCR 获取已选模型提供商失败: provider_id=%s error=%s", provider_id, exc)
+        return provider_id, None
+
+
+async def _call_provider_vision(provider: Any, image_input: str) -> str | None:
+    text_chat = getattr(provider, "text_chat", None)
+    if not callable(text_chat):
+        return None
+
+    try:
+        response = await text_chat(
+            prompt=OCR_PROMPT,
+            session_id=uuid.uuid4().hex,
+            image_urls=[image_input],
+            persist=False,
+        )
+    except TypeError as exc:
+        logger.warning("OCR 已选模型提供商不支持图片输入: %s", exc)
+        return None
+    except Exception as exc:
+        logger.warning("OCR 已选模型提供商调用失败: %s", exc)
+        return None
+
+    content = getattr(response, "completion_text", None)
+    if isinstance(content, str) and content.strip():
+        return content.strip()
+    return None
+
+
+async def handle_ocr_command(
+    event: AstrMessageEvent,
+    config: AstrBotConfig,
+    context: Any | None = None,
+) -> AsyncIterator[Any]:
     """
-    处理 /识别图片：从消息中取第一张图，按配置的服务商顺序请求视觉 API 做 OCR，返回识别文字。
+    处理 /识别图片：优先使用已选择的模型提供商；若未选择或调用失败，再按配置的手动服务商顺序请求视觉 API 做 OCR。
     """
-    if getattr(config, "ocr_enabled", True) is False:
+    runtime_config = ensure_flat_config(config)
+
+    if getattr(runtime_config, "ocr_enabled", True) is False:
         yield event.plain_result("OCR 功能未开启。")
         return
 
@@ -221,12 +272,35 @@ async def handle_ocr_command(event: AstrMessageEvent, config: AstrBotConfig) -> 
         yield event.plain_result("图片获取失败（无法读取或下载），请重试或换一张图。")
         return
 
-    providers = _get_providers(config)
+    provider_image_input = (
+        image_src
+        if image_src.startswith(("http://", "https://", "data:"))
+        else image_data_url
+    )
+    provider_id, selected_provider = _get_selected_provider(runtime_config, context)
+    last_error: str | None = None
+    if provider_id:
+        if not selected_provider:
+            last_error = f"未找到 ID 为 {provider_id} 的模型提供商"
+        else:
+            provider_result = await _call_provider_vision(selected_provider, provider_image_input)
+            if provider_result:
+                yield event.plain_result(provider_result)
+                return
+            last_error = "已选 OCR 模型提供商未返回有效识别结果，请确认它支持图片输入"
+
+    providers = _get_providers(runtime_config)
     if not providers:
-        yield event.plain_result("未配置 OCR 服务商，请在插件配置的「OCR 服务商」中添加至少一项（API 地址、API Key、模型名称）。")
+        if provider_id:
+            yield event.plain_result(
+                f"识别失败。{last_error or '已选 OCR 模型提供商不可用'}，并且没有配置手动 OCR 服务商作为兜底。"
+            )
+        else:
+            yield event.plain_result(
+                "未配置 OCR 模型提供商。请先在插件配置里选择「OCR 模型提供商」，或在「OCR 服务商」中手动添加至少一项。"
+            )
         return
 
-    last_error: str | None = None
     for prov in providers:
         base_url = (prov.get("base_url") or getattr(prov, "base_url", None) or "").strip()
         model = (prov.get("model") or getattr(prov, "model", None) or "gpt-4o-mini").strip()

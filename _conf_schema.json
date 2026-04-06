@@ -142,15 +142,16 @@
         "default": "Asia/Shanghai"
       },
       "stock_ai_provider_id": {
-        "description": "股票智能分析专用 Provider ID",
+        "description": "股票智能分析模型提供商",
         "type": "string",
-        "hint": "备用方案：填写 AstrBot 中已配置的聊天模型 Provider ID。若已配置下方“股票智能分析服务商”，则优先使用服务商配置。",
+        "_special": "select_provider",
+        "hint": "推荐直接选择 AstrBot 中已配置的聊天模型提供商。若仍配置了下方“股票智能分析服务商”，则继续按旧逻辑优先使用服务商列表。",
         "default": ""
       },
       "stock_ai_providers": {
-        "description": "股票智能分析服务商（可添加多个）",
+        "description": "股票智能分析服务商（高级兼容方式，可添加多个）",
         "type": "template_list",
-        "hint": "像 OCR 一样直接填写 API 地址、API Key、模型名。按列表顺序尝试，第一个失败则用下一个。",
+        "hint": "仅当你想手动填写 OpenAI 兼容接口时使用。按列表顺序尝试，第一个失败则用下一个。",
         "templates": {
           "openai_text": {
             "name": "OpenAI 兼容（文本）",
@@ -192,15 +193,16 @@
     "type": "object",
     "items": {
       "fund_ai_provider_id": {
-        "description": "基金智能分析专用 Provider ID",
+        "description": "基金智能分析模型提供商",
         "type": "string",
-        "hint": "备用方案：填写 AstrBot 中已配置的聊天模型 Provider ID。若已配置下方“基金智能分析服务商”，则优先使用服务商配置。",
+        "_special": "select_provider",
+        "hint": "推荐直接选择 AstrBot 中已配置的聊天模型提供商。若仍配置了下方“基金智能分析服务商”，则继续按旧逻辑优先使用服务商列表。",
         "default": ""
       },
       "fund_ai_providers": {
-        "description": "基金智能分析服务商（可添加多个）",
+        "description": "基金智能分析服务商（高级兼容方式，可添加多个）",
         "type": "template_list",
-        "hint": "像 OCR 一样直接填写 API 地址、API Key、模型名。按列表顺序尝试，第一个失败则用下一个。",
+        "hint": "仅当你想手动填写 OpenAI 兼容接口时使用。按列表顺序尝试，第一个失败则用下一个。",
         "templates": {
           "openai_text": {
             "name": "OpenAI 兼容（文本）",
@@ -554,7 +556,7 @@
   },
   "ocr": {
     "description": "图片文字识别（OCR）",
-    "hint": "在「OCR 服务商」中添加一个或多个服务商，每项只需填 API 地址、API Key、模型名称。按列表顺序尝试，第一个失败则用下一个。",
+    "hint": "推荐先选择下方「OCR 模型提供商」。如果你想手动接 OpenAI 兼容视觉接口，也可以继续使用下方「OCR 服务商」作为兼容兜底。",
     "type": "object",
     "items": {
       "ocr_enabled": {
@@ -563,10 +565,17 @@
         "hint": "关闭后 /识别图片 不响应。",
         "default": true
       },
+      "ocr_provider_id": {
+        "description": "OCR 模型提供商",
+        "type": "string",
+        "_special": "select_provider",
+        "hint": "推荐选择 AstrBot 中已配置、且支持视觉输入的模型提供商，例如 gpt-4o-mini、Qwen2-VL 等。留空则使用下方手动填写的 OCR 服务商列表。",
+        "default": ""
+      },
       "ocr_providers": {
-        "description": "OCR 服务商（可添加多个）",
+        "description": "OCR 服务商（高级兼容方式，可添加多个）",
         "type": "template_list",
-        "hint": "每项填写 API 地址、API Key、模型名称（需支持视觉输入，如 gpt-4o-mini）。",
+        "hint": "当上方未选择 OCR 模型提供商，或你想手动填写 OpenAI 兼容视觉接口时使用。每项填写 API 地址、API Key、模型名称（需支持视觉输入）。",
         "templates": {
           "openai_vision": {
             "name": "OpenAI 兼容（视觉/多模态）",

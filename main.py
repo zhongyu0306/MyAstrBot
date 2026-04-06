@@ -427,7 +427,7 @@ class AllCharPlugin(Star):
 
     @filter.command("识别图片", alias={"ocr", "图片识别"})
     async def cmd_ocr(self, event: AstrMessageEvent):
-        async for result in handle_ocr_command(event, self.config):
+        async for result in handle_ocr_command(event, self.config, self.context):
             yield result
 
     # ---------------- 动漫图片识别（AnimeTrace） ----------------

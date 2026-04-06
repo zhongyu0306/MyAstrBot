@@ -546,8 +546,17 @@ def _get_now_in_timezone(config: AstrBotConfig | None) -> datetime:
 def _get_proactive_platform(config: AstrBotConfig | None) -> str:
     if config is None:
         return _DEFAULT_PLATFORM
-    value = str(getattr(config, "proactive_send_platform", _DEFAULT_PLATFORM) or _DEFAULT_PLATFORM).strip().lower()
+    value = str(getattr(config, "proactive_send_platform", _DEFAULT_PLATFORM) or _DEFAULT_PLATFORM).strip()
     return value or _DEFAULT_PLATFORM
+
+
+def _build_target_umo(platform: str, target_type: str, target_id: str) -> str:
+    platform_name = str(platform or "").strip()
+    session_id = str(target_id or "").strip()
+    if not platform_name or not session_id:
+        return ""
+    message_type = "GroupMessage" if target_type == SCENE_GROUP else "FriendMessage"
+    return f"{platform_name}:{message_type}:{session_id}"
 
 
 def _normalize_time_slots(raw_value: Any) -> list[dict[str, Any]]:
@@ -709,6 +718,8 @@ class _ConfigProactiveMessageCenter:
         self.context = context
         self.config = config
         self._scheduler = None
+        self._loop_task: asyncio.Task | None = None
+        self._tick_lock = asyncio.Lock()
         self._available = False
         self._start_scheduler()
 
@@ -719,6 +730,12 @@ class _ConfigProactiveMessageCenter:
     def refresh(self, context: Context, config: AstrBotConfig) -> None:
         self.context = context
         self.config = config
+        if (
+            self._scheduler is None
+            and (self._loop_task is None or self._loop_task.done())
+            and not self._available
+        ):
+            self._start_fallback_loop()
 
     def _start_scheduler(self) -> None:
         try:
@@ -739,13 +756,41 @@ class _ConfigProactiveMessageCenter:
             self._available = True
             logger.info("主动消息配置调度已启动，时区=%s", tz_name)
         except ImportError:
-            logger.warning("未安装 apscheduler，配置式主动消息不可用。")
             self._scheduler = None
-            self._available = False
+            self._start_fallback_loop()
         except Exception as exc:
-            logger.error("主动消息配置调度启动失败: %s", exc)
             self._scheduler = None
+            logger.error("proactive scheduler startup failed: %s", exc)
+            self._start_fallback_loop()
+
+    def _start_fallback_loop(self) -> None:
+        if self._loop_task and not self._loop_task.done():
+            self._available = True
+            return
+        try:
+            self._loop_task = asyncio.create_task(self._fallback_loop())
+            self._available = True
+            logger.info("proactive message fallback loop started")
+        except RuntimeError as exc:
+            logger.error("proactive fallback loop startup failed: %s", exc)
+            self._loop_task = None
             self._available = False
+
+    async def _fallback_loop(self) -> None:
+        while True:
+            try:
+                await self._safe_run_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error("proactive fallback loop tick failed: %s", exc)
+            await asyncio.sleep(15)
+
+    async def _safe_run_tick(self) -> None:
+        if self._tick_lock.locked():
+            return
+        async with self._tick_lock:
+            await self._run_tick()
 
     async def _run_tick(self) -> None:
         if not bool(getattr(self.config, "proactive_enabled", False)):
@@ -897,19 +942,32 @@ class _ConfigProactiveMessageCenter:
 
         chain = MessageChain()
         chain.message(content)
-        message_type = "GroupMessage" if target_type == SCENE_GROUP else "PrivateMessage"
         platform = _get_proactive_platform(self.config)
+        errors: list[str] = []
 
-        try:
-            await StarTools.send_message_by_id(
-                type=message_type,
-                id=str(target_id),
-                message_chain=chain,
-                platform=platform,
-            )
-            return True, ""
-        except Exception as exc:
-            return False, str(exc)
+        if platform.casefold() == "aiocqhttp":
+            try:
+                await StarTools.send_message_by_id(
+                    type="GroupMessage" if target_type == SCENE_GROUP else "PrivateMessage",
+                    id=str(target_id),
+                    message_chain=chain,
+                    platform="aiocqhttp",
+                )
+                return True, ""
+            except Exception as exc:
+                errors.append(f"send_message_by_id failed: {exc}")
+
+        target_umo = _build_target_umo(platform, target_type, target_id)
+        if target_umo:
+            try:
+                sent = await self.context.send_message(target_umo, chain)
+                if sent:
+                    return True, ""
+                errors.append(f"context.send_message returned False for {target_umo}")
+            except Exception as exc:
+                errors.append(f"context.send_message failed: {exc}")
+
+        return False, " | ".join(errors) if errors else "send failed"
 
 
 _PROACTIVE_CENTER: _ConfigProactiveMessageCenter | None = None
