@@ -44,6 +44,7 @@ const HABIT_MODULES = [
   { value: "fund", label: "基金" },
   { value: "email", label: "邮件" },
   { value: "reminder", label: "提醒" },
+  { value: "lol", label: "LOL" },
   { value: "chat", label: "聊天" },
 ];
 
@@ -59,6 +60,10 @@ const HABIT_KEYS = {
   ],
   email: [{ value: "recipient", label: "常用收件人" }],
   reminder: [{ value: "reminder_time", label: "常设提醒时间" }],
+  lol: [
+    { value: "summoner_name", label: "默认昵称" },
+    { value: "area_name", label: "常用大区" },
+  ],
   chat: [{ value: "routine", label: "常聊习惯" }],
 };
 

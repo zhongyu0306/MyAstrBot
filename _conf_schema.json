@@ -187,6 +187,74 @@
       }
     }
   },
+  "lol": {
+    "description": "英雄联盟战绩查询与群订阅",
+    "hint": "仅支持国服腾讯服 WeGame Cookie 模式；支持查询、LLM 战绩分析、QQ群分群订阅，并会把默认昵称/大区写入记忆面板习惯项。",
+    "type": "object",
+    "items": {
+      "lol_tencent_cookie": {
+        "description": "WeGame 登录 Cookie（腾讯服）",
+        "type": "string",
+        "hint": "用于调用 wegame.pallas.game.LolBattle 接口；过期后需要更新。",
+        "obvious_hint": true,
+        "default": ""
+      },
+      "lol_tencent_base_url": {
+        "description": "腾讯服 API 基础地址",
+        "type": "string",
+        "hint": "默认 https://www.wegame.com.cn，一般无需修改。",
+        "default": "https://www.wegame.com.cn"
+      },
+      "lol_tencent_default_area": {
+        "description": "腾讯服默认大区",
+        "type": "int",
+        "hint": "不写大区时使用该值。常见：1=艾欧尼亚，6=德玛西亚，14=黑色玫瑰，30=男爵领域。",
+        "slider": { "min": 1, "max": 999, "step": 1 },
+        "default": 1
+      },
+      "lol_tencent_account_type": {
+        "description": "腾讯服账号类型",
+        "type": "int",
+        "hint": "默认 2（openid）；一般无需修改。",
+        "slider": { "min": 1, "max": 5, "step": 1 },
+        "default": 2
+      },
+      "lol_subscription_timezone": {
+        "description": "订阅推送时区",
+        "type": "string",
+        "hint": "例如 Asia/Shanghai。",
+        "default": "Asia/Shanghai"
+      },
+      "lol_push_hourly_minute": {
+        "description": "每小时触发分钟",
+        "type": "int",
+        "hint": "0 表示整点触发；15 表示每小时 xx:15 触发。",
+        "slider": { "min": 0, "max": 59, "step": 1 },
+        "default": 0
+      },
+      "lol_query_match_count": {
+        "description": "单次查询默认场次",
+        "type": "int",
+        "hint": "命令查询默认返回最近几场战绩。",
+        "slider": { "min": 1, "max": 10, "step": 1 },
+        "default": 3
+      },
+      "lol_subscription_push_limit": {
+        "description": "订阅每次最多推送新对局数",
+        "type": "int",
+        "hint": "检测到有多场新对局时，单次推送的上限，避免刷屏。",
+        "slider": { "min": 1, "max": 5, "step": 1 },
+        "default": 3
+      },
+      "lol_api_timeout_seconds": {
+        "description": "LoL API 请求超时（秒）",
+        "type": "int",
+        "hint": "腾讯服战绩查询、订阅轮询都会使用此超时。",
+        "slider": { "min": 5, "max": 60, "step": 1 },
+        "default": 12
+      }
+    }
+  },
   "fund": {
     "description": "基金分析",
     "hint": "基金智能分析专用模型等。",

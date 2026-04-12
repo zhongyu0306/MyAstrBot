@@ -25,6 +25,7 @@ from .stock_utils import (
     _search_code_by_name,
     handle_stock_command,
 )
+from .lol_utils import handle_lol_command, init_lol_subscription_center, query_lol_for_event
 from .fund_analysis_utils import handle_fund_command
 from .weather_utils import (
     _query_weather_text,
@@ -275,6 +276,8 @@ class AllCharPlugin(Star):
         init_simple_reminder_center(self.context, self.config)
         # 初始化邮件订阅定时发送中心（持久化订阅 + 每日到点发送）
         init_email_subscription_center(self.context, self.config)
+        # 初始化 LoL 战绩订阅中心（群聊每小时轮询）
+        init_lol_subscription_center(self.context, self.config)
         # 初始化用户永久记忆存储
         init_user_memory_store()
         configure_memory_admin_qq_ids(getattr(self.config, "memory_admin_qq_ids", None))
@@ -294,6 +297,7 @@ class AllCharPlugin(Star):
         try:
             self.context.add_llm_tools(
                 StockQueryTool(),
+                LolQueryTool(),
                 WeatherQueryTool(),
                 SimpleReminderTool(),
                 BookkeepingAddExpenseTool(),
@@ -402,6 +406,13 @@ class AllCharPlugin(Star):
         # 避免长耗时股票分析在后台执行时，同一条消息又继续走自然语言链路。
         event.stop_event()
         async for result in handle_stock_command(event, self.context, self.config):
+            yield result
+
+    @filter.command("lol", alias={"LOL", "英雄联盟", "联盟战绩"})
+    async def cmd_lol(self, event: AstrMessageEvent):
+        # 避免命令与自然语言链路同时回复
+        event.stop_event()
+        async for result in handle_lol_command(event, self.context, self.config):
             yield result
 
     @filter.command("基金", alias={"fund"})
@@ -1092,6 +1103,79 @@ class StockQueryTool(FunctionTool[AstrAgentContext]):
         if not quotes:
             return "暂无行情数据或查询失败，请稍后重试。"
         return _format_quotes(quotes, "股票行情")
+
+
+@dataclass
+class LolQueryTool(FunctionTool[AstrAgentContext]):
+    """
+    查询国服 LoL 最近战绩，并可选使用当前会话 LLM 做分析。
+    """
+
+    name: str = "lol_query"
+    description: str = (
+        "查询国服腾讯服英雄联盟最近战绩。支持传入昵称、大区和场次；如果当前用户已经在记忆面板里记住了默认 LoL 账号，"
+        "则 nickname 和 area 留空时会自动使用已记住的账号。可选 `analyze=true` 让 LLM 分析最近战绩。"
+    )
+    parameters: dict = Field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "nickname": {
+                    "type": "string",
+                    "description": "召唤师昵称，可选；留空时尝试读取当前用户记住的默认昵称。",
+                },
+                "area": {
+                    "type": "string",
+                    "description": "国服大区，可填中文名或编号，例如 艾欧尼亚、黑色玫瑰、1、14。",
+                },
+                "match_count": {
+                    "type": "integer",
+                    "description": "查询最近几场，1-10，默认使用插件配置。",
+                    "minimum": 1,
+                    "maximum": 10,
+                },
+                "analyze": {
+                    "type": "boolean",
+                    "description": "是否让当前会话 LLM 进一步分析最近战绩，默认 false。",
+                },
+            },
+            "required": [],
+        }
+    )
+
+    async def call(
+        self,
+        context: ContextWrapper[AstrAgentContext],
+        nickname: str | None = None,
+        area: str | None = None,
+        match_count: int | None = None,
+        analyze: bool | None = None,
+        **kwargs,
+    ) -> ToolExecResult:
+        del kwargs
+        ctx = context.context.context
+        event = context.context.event
+        cfg = _get_effective_config(ctx, AllCharPlugin._shared_config)  # type: ignore[arg-type]
+
+        area_text = (area or "").strip()
+        raw_text = ""
+        parsed_area: int | None = None
+        if area_text:
+            if area_text.isdigit():
+                parsed_area = int(area_text)
+            else:
+                raw_text = area_text
+
+        return await query_lol_for_event(
+            event,
+            ctx,
+            cfg,
+            area=parsed_area,
+            nickname=(nickname or "").strip() or None,
+            match_count=match_count,
+            analyze=bool(analyze),
+            raw_text=raw_text,
+        )
 
 
 @dataclass

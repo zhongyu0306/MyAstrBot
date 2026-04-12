@@ -6,6 +6,7 @@ _MODULE_KEYS = (
     "train",
     "sy",
     "stock",
+    "lol",
     "fund",
     "weather",
     "memory",

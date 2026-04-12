@@ -124,6 +124,8 @@ _HABIT_LABELS = {
     ("fund", "default_fund_code"): "默认基金偏向 {value}",
     ("email", "recipient"): "邮件常发给 {value}",
     ("reminder", "reminder_time"): "提醒常设在 {value}",
+    ("lol", "summoner_name"): "LOL 常查昵称 {value}",
+    ("lol", "area_name"): "LOL 常用大区 {value}",
     ("chat", "routine"): "聊天里常提到的习惯: {value}",
 }
 
