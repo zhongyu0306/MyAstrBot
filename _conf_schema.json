@@ -1,7 +1,42 @@
 {
+  "weather": {
+    "description": "基础查询：全球天气",
+    "hint": "默认走 Open-Meteo，支持全球城市、1-7 天天气和自然语言日期。一般只需要关心默认返回格式。",
+    "type": "object",
+    "items": {
+      "weather_api_url": {
+        "description": "兼容旧版的自定义天气 API 地址",
+        "type": "string",
+        "hint": "留空时自动使用 Open-Meteo；仅当你要接入旧版或自定义天气接口时再填写。",
+        "default": ""
+      },
+      "weather_forecast_api_url": {
+        "description": "Open-Meteo 预报 API 地址",
+        "type": "string",
+        "hint": "默认即可，除非你需要自托管或商业保留端点。",
+        "default": "https://api.open-meteo.com/v1/forecast"
+      },
+      "weather_geocoding_api_url": {
+        "description": "Open-Meteo 地理编码 API 地址",
+        "type": "string",
+        "hint": "用于把城市名解析成经纬度，默认支持全球城市搜索。",
+        "default": "https://geocoding-api.open-meteo.com/v1/search"
+      },
+      "weather_default_format": {
+        "description": "默认返回格式",
+        "type": "string",
+        "options": [
+          "text",
+          "image"
+        ],
+        "hint": "默认推荐 text。Open-Meteo 返回文本；若你接的是旧版自定义图片天气 API，可切到 image。",
+        "default": "text"
+      }
+    }
+  },
   "train": {
-    "description": "火车票查询",
-    "hint": "火车票查询 API 与返回格式配置。",
+    "description": "基础查询：火车票",
+    "hint": "用于查车次、余票和时刻。通常保持默认即可，只在你要改返回格式或接自定义接口时再调整。",
     "type": "object",
     "items": {
       "train_api_url": {
@@ -13,15 +48,249 @@
       "train_default_format": {
         "description": "默认返回格式",
         "type": "string",
-        "options": ["text", "image"],
+        "options": [
+          "text",
+          "image"
+        ],
         "hint": "text=纯文本，image=表格图片",
         "default": "text"
       }
     }
   },
+  "qianfan_search": {
+    "description": "联网搜索：百度千帆",
+    "hint": "用于 `/智能搜索` 和 `/搜索`。最重要的是 API Key，其余两项是控制交给 LLM 的提示词模板。",
+    "type": "object",
+    "items": {
+      "qianfan_search_ak": {
+        "description": "千帆 API Key",
+        "type": "string",
+        "hint": "百度千帆控制台获取，直接作为 Bearer 鉴权，用于 `/智能搜索` 和 `/搜索`。",
+        "obvious_hint": true,
+        "default": ""
+      },
+      "qianfan_search_web_prompt": {
+        "description": "网页搜索交给 LLM 的提示词模板",
+        "type": "text",
+        "hint": "占位符：{query}=搜索关键词，{search_results}=原始结果正文。可要求「使用当前人格」并避免奇怪标点。留空用默认。",
+        "obvious_hint": false,
+        "editor_mode": true,
+        "editor_language": "text",
+        "default": "请严格以当前设定的人格与口吻回复。\n以下是一次网页搜索的原始结果，请根据用户的问题或关键词，用简洁、有条理的中文总结并回答。\n使用正常中文标点（如全角逗号、句号、省略号……），不要使用混用或奇怪符号。\n若结果中有链接，可保留重要链接。不要编造未在结果中出现的内容。\n\n用户搜索关键词：{query}\n\n搜索结果：\n{search_results}"
+      },
+      "qianfan_search_smart_prompt": {
+        "description": "智能搜索交给 LLM 的提示词模板",
+        "type": "text",
+        "hint": "占位符：{smart_search_result}=千帆智能搜索返回的原文。可要求「当前人格」并避免大量*等 Markdown 符号。留空用默认。",
+        "obvious_hint": false,
+        "editor_mode": true,
+        "editor_language": "text",
+        "default": "请严格以当前设定的人格与口吻整理以下智能搜索结果。使用正常中文标点，避免大量星号（*）或 Markdown 符号。直接输出整理后的回答，不要编造内容。\n\n原始结果：\n{smart_search_result}"
+      }
+    }
+  },
+  "stock": {
+    "description": "投资分析：股票与自选股",
+    "hint": "包含自选股提醒时区、智能分析模型和超时配置。大多数情况下只需要选好模型并按需调整超时。",
+    "type": "object",
+    "items": {
+      "stock_reminder_timezone": {
+        "description": "定时提醒使用的时区",
+        "type": "string",
+        "hint": "例如 Asia/Shanghai",
+        "default": "Asia/Shanghai"
+      },
+      "stock_ai_provider_id": {
+        "description": "股票智能分析模型提供商",
+        "type": "string",
+        "_special": "select_provider",
+        "hint": "推荐选择 AstrBot 中已配置的聊天模型提供商；留空则使用当前会话模型。",
+        "default": ""
+      },
+      "stock_ai_timeout_seconds": {
+        "description": "股票智能分析模型超时（秒）",
+        "type": "int",
+        "hint": "股票智能分析调用大模型的最大等待时间。模型较慢或走海外接口时可适当调大。",
+        "slider": {
+          "min": 30,
+          "max": 300,
+          "step": 5
+        },
+        "default": 90
+      }
+    }
+  },
+  "fund": {
+    "description": "投资分析：基金分析",
+    "hint": "包含基金智能分析模型和超时配置。大多数情况下只需要选好模型并按需调整超时。",
+    "type": "object",
+    "items": {
+      "fund_ai_provider_id": {
+        "description": "基金智能分析模型提供商",
+        "type": "string",
+        "_special": "select_provider",
+        "hint": "推荐选择 AstrBot 中已配置的聊天模型提供商；留空则使用当前会话模型。",
+        "default": ""
+      },
+      "fund_ai_timeout_seconds": {
+        "description": "基金智能分析模型超时（秒）",
+        "type": "int",
+        "hint": "基金智能分析调用大模型的最大等待时间。模型较慢或走海外接口时可适当调大。",
+        "slider": {
+          "min": 30,
+          "max": 300,
+          "step": 5
+        },
+        "default": 90
+      }
+    }
+  },
+  "lol": {
+    "description": "游戏：LoL 战绩与群订阅",
+    "hint": "只支持国服 WeGame Cookie。常用项是 Cookie、默认大区、查询场次、订阅时区和推送频率。",
+    "type": "object",
+    "items": {
+      "lol_tencent_cookie": {
+        "description": "WeGame 登录 Cookie（腾讯服）",
+        "type": "string",
+        "hint": "用于调用 wegame.pallas.game.LolBattle 接口；过期后需要更新。",
+        "obvious_hint": true,
+        "default": ""
+      },
+      "lol_tencent_base_url": {
+        "description": "腾讯服 API 基础地址",
+        "type": "string",
+        "hint": "默认 https://www.wegame.com.cn，一般无需修改。",
+        "default": "https://www.wegame.com.cn"
+      },
+      "lol_tencent_default_area": {
+        "description": "腾讯服默认大区",
+        "type": "int",
+        "hint": "不写大区时使用该值。常见：1=艾欧尼亚，6=德玛西亚，14=黑色玫瑰，30=男爵领域。",
+        "slider": {
+          "min": 1,
+          "max": 999,
+          "step": 1
+        },
+        "default": 1
+      },
+      "lol_tencent_account_type": {
+        "description": "腾讯服账号类型",
+        "type": "int",
+        "hint": "默认 2（openid）；一般无需修改。",
+        "slider": {
+          "min": 1,
+          "max": 5,
+          "step": 1
+        },
+        "default": 2
+      },
+      "lol_subscription_timezone": {
+        "description": "订阅推送时区",
+        "type": "string",
+        "hint": "例如 Asia/Shanghai。",
+        "default": "Asia/Shanghai"
+      },
+      "lol_push_hourly_minute": {
+        "description": "每小时触发分钟",
+        "type": "int",
+        "hint": "0 表示整点触发；15 表示每小时 xx:15 触发。",
+        "slider": {
+          "min": 0,
+          "max": 59,
+          "step": 1
+        },
+        "default": 0
+      },
+      "lol_query_match_count": {
+        "description": "单次查询默认场次",
+        "type": "int",
+        "hint": "命令查询默认返回最近几场战绩。",
+        "slider": {
+          "min": 1,
+          "max": 10,
+          "step": 1
+        },
+        "default": 3
+      },
+      "lol_subscription_push_limit": {
+        "description": "订阅每次最多推送新对局数",
+        "type": "int",
+        "hint": "检测到有多场新对局时，单次推送的上限，避免刷屏。",
+        "slider": {
+          "min": 1,
+          "max": 5,
+          "step": 1
+        },
+        "default": 3
+      },
+      "lol_api_timeout_seconds": {
+        "description": "LoL API 请求超时（秒）",
+        "type": "int",
+        "hint": "腾讯服战绩查询、订阅轮询都会使用此超时。",
+        "slider": {
+          "min": 5,
+          "max": 60,
+          "step": 1
+        },
+        "default": 12
+      }
+    }
+  },
+  "ocr": {
+    "description": "内容识别：图片文字识别",
+    "hint": "优先使用 AstrBot 已配置且支持视觉输入的模型做 OCR；若保留了旧版兼容配置，也会按手动 OCR 服务商顺序兜底。",
+    "type": "object",
+    "items": {
+      "ocr_enabled": {
+        "description": "启用 OCR 功能",
+        "type": "bool",
+        "hint": "关闭后 /识别图片 不响应。",
+        "default": true
+      },
+      "ocr_provider_id": {
+        "description": "OCR 模型提供商",
+        "type": "string",
+        "_special": "select_provider",
+        "hint": "推荐选择 AstrBot 中已配置、且支持视觉输入的模型提供商，例如 gpt-4o-mini、Qwen2-VL 等；留空时仅会尝试旧版兼容的手动 OCR 服务商配置。",
+        "default": ""
+      }
+    }
+  },
+  "animetrace": {
+    "description": "内容识别：动漫截图识别",
+    "hint": "用于识别番剧和角色。通常只需要关心接口地址和模型名，其他参数保持默认即可。",
+    "type": "object",
+    "items": {
+      "animetrace_api_url": {
+        "description": "AnimeTrace 接口地址",
+        "type": "string",
+        "hint": "默认使用官方地址：https://api.animetrace.com/v1/search",
+        "default": "https://api.animetrace.com/v1/search"
+      },
+      "animetrace_model": {
+        "description": "识别模型名称",
+        "type": "string",
+        "hint": "参考 AnimeTrace 文档的模型名，如 animetrace_high_beta。",
+        "default": "animetrace_high_beta"
+      },
+      "animetrace_is_multi": {
+        "description": "返回多个候选结果",
+        "type": "bool",
+        "hint": "开启后 is_multi=1，将返回多个匹配结果；关闭则只返回最佳结果。",
+        "default": false
+      },
+      "animetrace_ai_detect": {
+        "description": "开启 AI 图检测",
+        "type": "bool",
+        "hint": "对应 AnimeTrace 的 ai_detect 参数，开启时传 1，关闭时传 2。",
+        "default": true
+      }
+    }
+  },
   "sy": {
-    "description": "智能定时任务",
-    "hint": "提醒、任务、会话隔离与上下文等。",
+    "description": "自动化：提醒与定时任务",
+    "hint": "如果你主要用 `/提醒`，先看这组。这里集中管理提醒、任务、上下文、@ 提醒、白名单和自动清理。",
     "type": "object",
     "items": {
       "sy_unique_session": {
@@ -36,7 +305,11 @@
         "type": "list",
         "hint": "消息平台接入的微信平台名，注意不是机器人名称。",
         "obvious_hint": true,
-        "default": ["gewechat", "wechatpadpro", "wecom"]
+        "default": [
+          "gewechat",
+          "wechatpadpro",
+          "wecom"
+        ]
       },
       "sy_whitelist": {
         "description": "用户白名单",
@@ -66,7 +339,11 @@
         "type": "int",
         "hint": "启用上下文时，最多使用用户最近多少条对话。建议 3–10。",
         "obvious_hint": false,
-        "slider": { "min": 1, "max": 20, "step": 1 },
+        "slider": {
+          "min": 1,
+          "max": 20,
+          "step": 1
+        },
         "default": 5
       },
       "sy_enable_reminder_at": {
@@ -109,7 +386,11 @@
         "type": "int",
         "hint": "限制每个用户能创建的提醒和任务总数；0 表示不限制。建议 10–30。",
         "obvious_hint": true,
-        "slider": { "min": 0, "max": 100, "step": 1 },
+        "slider": {
+          "min": 0,
+          "max": 100,
+          "step": 1
+        },
         "default": 15
       },
       "sy_max_command_wait_time": {
@@ -117,7 +398,11 @@
         "type": "int",
         "hint": "指令任务执行时等待响应的最大时间，执行较慢时可适当增大。",
         "obvious_hint": true,
-        "slider": { "min": 5, "max": 300, "step": 5 },
+        "slider": {
+          "min": 5,
+          "max": 300,
+          "step": 5
+        },
         "default": 20
       },
       "sy_inactive_timeout_hours": {
@@ -125,222 +410,294 @@
         "type": "int",
         "hint": "用户超过指定小时数未与 Bot 互动，则自动删除其所有提醒和任务。0 表示不限制。",
         "obvious_hint": true,
-        "slider": { "min": 0, "max": 336, "step": 1 },
+        "slider": {
+          "min": 0,
+          "max": 336,
+          "step": 1
+        },
         "default": 0
       }
     }
   },
-  "stock": {
-    "description": "股票与自选股",
-    "hint": "定时提醒、股票智能分析专用模型等。",
+  "proactive": {
+    "description": "自动化：主动消息",
+    "hint": "用于让 bot 监控指定 QQ 私聊 / QQ 群，在沉默一段时间后主动发一句消息。常用项是目标 QQ/群号、触发间隔、免打扰时段和文案提示词。",
     "type": "object",
     "items": {
-      "stock_reminder_timezone": {
-        "description": "定时提醒使用的时区",
+      "proactive_enabled": {
+        "description": "启用轻量主动聊天",
+        "type": "bool",
+        "hint": "开启后会监控下方配置的 QQ 列表和群号列表；当目标会话沉默达到条件时，bot 会主动发消息。",
+        "default": false
+      },
+      "proactive_admin_qq_ids": {
+        "description": "主动消息管理员 QQ 列表",
+        "type": "list",
+        "hint": "只有这些管理员可以使用 `/主动消息` 与主动消息 LLM 工具；留空时会回退使用 `memory_admin_qq_ids`。配置式自动发送本身不依赖手动命令。",
+        "default": []
+      },
+      "proactive_private_qq_ids": {
+        "description": "主动私聊 QQ 列表",
+        "type": "list",
+        "hint": "配置 bot 需要主动私聊发送的 QQ 号列表，例如 123456789。",
+        "default": []
+      },
+      "proactive_group_ids": {
+        "description": "主动群聊群号列表",
+        "type": "list",
+        "hint": "配置 bot 需要主动群发消息的 QQ 群号列表。",
+        "default": []
+      },
+      "proactive_timezone": {
+        "description": "主动消息时区",
         "type": "string",
-        "hint": "例如 Asia/Shanghai",
+        "hint": "例如 Asia/Shanghai。时段规则会按这个时区执行。",
         "default": "Asia/Shanghai"
       },
-      "stock_ai_provider_id": {
-        "description": "股票智能分析模型提供商",
+      "proactive_send_platform": {
+        "description": "主动消息发送平台",
         "type": "string",
-        "_special": "select_provider",
-        "hint": "推荐直接选择 AstrBot 中已配置的聊天模型提供商。若仍配置了下方“股票智能分析服务商”，则继续按旧逻辑优先使用服务商列表。",
+        "options": [
+          "aiocqhttp"
+        ],
+        "hint": "当前按 QQ 号 / 群号直发仅支持 aiocqhttp。",
+        "default": "aiocqhttp"
+      },
+      "proactive_llm_umo": {
+        "description": "主动消息生成用会话 ID",
+        "type": "string",
+        "hint": "可选。填写后优先用这个会话的模型来生成主动消息；留空则优先尝试目标会话当前使用的模型，失败时回退固定文案。",
         "default": ""
       },
-      "stock_ai_providers": {
-        "description": "股票智能分析服务商（高级兼容方式，可添加多个）",
+      "proactive_auto_trigger_enabled": {
+        "description": "启用冷启动自动触发",
+        "type": "bool",
+        "hint": "开启后，插件启动后即使目标会话还没有新消息，也会在等待一段时间后尝试主动发第一条消息。",
+        "default": true
+      },
+      "proactive_auto_trigger_after_minutes": {
+        "description": "冷启动等待分钟数",
+        "type": "int",
+        "hint": "当启用了冷启动自动触发时，插件启动后会等待这么多分钟，再尝试给目标 QQ / 群发第一条主动消息。",
+        "slider": {
+          "min": 1,
+          "max": 1440,
+          "step": 1
+        },
+        "default": 30
+      },
+      "proactive_min_interval_minutes": {
+        "description": "最小触发间隔（分钟）",
+        "type": "int",
+        "hint": "用户或 bot 在目标会话里有新消息后，至少沉默这么久，才会触发下一次主动消息。",
+        "slider": {
+          "min": 1,
+          "max": 1440,
+          "step": 1
+        },
+        "default": 30
+      },
+      "proactive_max_interval_minutes": {
+        "description": "最大触发间隔（分钟）",
+        "type": "int",
+        "hint": "实际触发时间会在最小和最大间隔之间随机，避免每次都固定时间发送。",
+        "slider": {
+          "min": 1,
+          "max": 1440,
+          "step": 1
+        },
+        "default": 180
+      },
+      "proactive_quiet_hours": {
+        "description": "免打扰时段",
+        "type": "string",
+        "hint": "格式如 `1-7` 或 `23-8`，表示这个时间段内不主动发消息；留空则不启用免打扰。",
+        "default": "1-7"
+      },
+      "proactive_max_unanswered_times": {
+        "description": "连续未回复上限",
+        "type": "int",
+        "hint": "bot 连续主动发这么多次但对方都没回复后，会暂停继续主动发，直到目标会话再次出现新消息。填 0 表示不限制。",
+        "slider": {
+          "min": 0,
+          "max": 20,
+          "step": 1
+        },
+        "default": 3
+      },
+      "proactive_history_limit": {
+        "description": "生成时携带的历史条数",
+        "type": "int",
+        "hint": "用于 LLM 生成主动消息时带上的最近聊天记录条数，越大越有上下文，但也更耗 token。",
+        "slider": {
+          "min": 0,
+          "max": 50,
+          "step": 1
+        },
+        "default": 12
+      },
+      "proactive_message_text": {
+        "description": "固定兜底文案",
+        "type": "text",
+        "hint": "当未配置 LLM 或生成失败时发送这段文本。支持占位符：{current_time} {date} {time} {weekday} {target_type} {target_label} {target_id} {unanswered_count}",
+        "editor_mode": true,
+        "editor_language": "text",
+        "default": "在忙吗？我来冒个泡。"
+      },
+      "proactive_prompt_template": {
+        "description": "主动消息提示词",
+        "type": "text",
+        "hint": "可选。用于指导 LLM 怎样主动开场。支持占位符：{current_time} {date} {time} {weekday} {target_type} {target_label} {target_id} {unanswered_count}",
+        "editor_mode": true,
+        "editor_language": "text",
+        "default": ""
+      },
+      "proactive_time_slots": {
+        "description": "旧版时段规则（兼容项）",
         "type": "template_list",
-        "hint": "仅当你想手动填写 OpenAI 兼容接口时使用。按列表顺序尝试，第一个失败则用下一个。",
+        "hint": "当前轻量主动聊天不再按这个规则定时发送；这里只保留兼容，若你以前在里面写了 message_text / prompt_template，会被当成默认文案回退使用。",
         "templates": {
-          "openai_text": {
-            "name": "OpenAI 兼容（文本）",
+          "time_slot_rule": {
+            "name": "主动消息时段规则",
             "items": {
-              "base_url": {
+              "name": {
                 "type": "string",
-                "description": "API 地址",
-                "hint": "例如 https://api.siliconflow.cn/v1 或其他 OpenAI 兼容地址",
-                "default": "https://api.siliconflow.cn/v1"
+                "description": "规则名称",
+                "hint": "仅用于区分和查看日志，例如：早安问候、午间提醒。",
+                "default": "主动消息规则"
               },
-              "api_keys": {
-                "type": "list",
-                "description": "API Key",
-                "default": [],
-                "obvious_hint": true
+              "enabled": {
+                "type": "bool",
+                "description": "启用该规则",
+                "default": true
               },
-              "model": {
+              "target_scope": {
                 "type": "string",
-                "description": "模型名称",
-                "hint": "例如 Qwen/QwQ、DeepSeek、gpt-4o-mini 等文本模型",
-                "default": "Qwen/Qwen2.5-72B-Instruct"
+                "description": "发送对象类型",
+                "options": [
+                  "both",
+                  "private",
+                  "group"
+                ],
+                "hint": "both=同时发给私聊 QQ 列表和群号列表；private=只发私聊；group=只发群。",
+                "default": "both"
+              },
+              "start_hour": {
+                "type": "int",
+                "description": "开始小时",
+                "hint": "24 小时制，0-23。支持跨天，例如开始 22、结束 2。",
+                "slider": {
+                  "min": 0,
+                  "max": 23,
+                  "step": 1
+                },
+                "default": 9
+              },
+              "end_hour": {
+                "type": "int",
+                "description": "结束小时",
+                "hint": "24 小时制，0-23，按包含结束小时处理。",
+                "slider": {
+                  "min": 0,
+                  "max": 23,
+                  "step": 1
+                },
+                "default": 23
+              },
+              "minute": {
+                "type": "int",
+                "description": "触发分钟",
+                "hint": "每到命中的小时，会在这个分钟触发，例如填 0 就是整点触发。",
+                "slider": {
+                  "min": 0,
+                  "max": 59,
+                  "step": 1
+                },
+                "default": 0
+              },
+              "message_text": {
+                "type": "text",
+                "description": "固定发送文案",
+                "hint": "可直接填写最终发送内容。支持占位符：{now} {date} {time} {hour} {minute} {weekday} {slot_name} {target_type} {target_id}。",
+                "editor_mode": true,
+                "editor_language": "text",
+                "default": ""
+              },
+              "prompt_template": {
+                "type": "text",
+                "description": "LLM 生成提示词",
+                "hint": "可选。填写后会用 proactive_llm_umo 对应的模型生成最终文案；留空则直接发送上面的固定文案。",
+                "editor_mode": true,
+                "editor_language": "text",
+                "default": ""
               }
             }
           }
-        }
-      },
-      "stock_ai_timeout_seconds": {
-        "description": "股票智能分析模型超时（秒）",
-        "type": "int",
-        "hint": "股票智能分析调用大模型的最大等待时间。模型较慢或走海外接口时可适当调大。",
-        "slider": { "min": 30, "max": 300, "step": 5 },
-        "default": 90
+        },
+        "default": []
       }
     }
   },
-  "lol": {
-    "description": "英雄联盟战绩查询与群订阅",
-    "hint": "仅支持国服腾讯服 WeGame Cookie 模式；支持查询、LLM 战绩分析、QQ群分群订阅，并会把默认昵称/大区写入记忆面板习惯项。",
+  "email": {
+    "description": "通知与订阅：邮件发送",
+    "hint": "常用项是发件邮箱、授权码和订阅时间。注意这里用的是 QQ 邮箱授权码，不是 QQ 登录密码。",
     "type": "object",
     "items": {
-      "lol_tencent_cookie": {
-        "description": "WeGame 登录 Cookie（腾讯服）",
+      "email_sender": {
+        "description": "发件人 QQ 邮箱",
         "type": "string",
-        "hint": "用于调用 wegame.pallas.game.LolBattle 接口；过期后需要更新。",
+        "hint": "用于发送邮件的 QQ 邮箱地址，例如 123456789@qq.com。",
         "obvious_hint": true,
         "default": ""
       },
-      "lol_tencent_base_url": {
-        "description": "腾讯服 API 基础地址",
+      "email_auth_code": {
+        "description": "QQ 邮箱授权码",
         "type": "string",
-        "hint": "默认 https://www.wegame.com.cn，一般无需修改。",
-        "default": "https://www.wegame.com.cn"
+        "hint": "在 QQ 邮箱网页版 -> 设置 -> 账户 -> POP3/IMAP 服务 中开启服务后获取的授权码，不是 QQ 登录密码。",
+        "obvious_hint": true,
+        "default": ""
       },
-      "lol_tencent_default_area": {
-        "description": "腾讯服默认大区",
-        "type": "int",
-        "hint": "不写大区时使用该值。常见：1=艾欧尼亚，6=德玛西亚，14=黑色玫瑰，30=男爵领域。",
-        "slider": { "min": 1, "max": 999, "step": 1 },
-        "default": 1
-      },
-      "lol_tencent_account_type": {
-        "description": "腾讯服账号类型",
-        "type": "int",
-        "hint": "默认 2（openid）；一般无需修改。",
-        "slider": { "min": 1, "max": 5, "step": 1 },
-        "default": 2
-      },
-      "lol_subscription_timezone": {
-        "description": "订阅推送时区",
+      "email_smtp_host": {
+        "description": "SMTP 服务器",
         "type": "string",
-        "hint": "例如 Asia/Shanghai。",
+        "hint": "QQ 邮箱使用 smtp.qq.com，一般无需修改。",
+        "default": "smtp.qq.com"
+      },
+      "email_smtp_port": {
+        "description": "SMTP 端口",
+        "type": "string",
+        "hint": "QQ 邮箱 SSL 为 465，TLS 为 587。",
+        "default": "465"
+      },
+      "email_subscription_time": {
+        "description": "邮件订阅每日发送时间",
+        "type": "string",
+        "hint": "格式 时:分，如 08:00 表示每天 8 点发送。",
+        "default": "08:00"
+      },
+      "email_subscription_timezone": {
+        "description": "邮件订阅时区",
+        "type": "string",
+        "hint": "如 Asia/Shanghai。",
         "default": "Asia/Shanghai"
       },
-      "lol_push_hourly_minute": {
-        "description": "每小时触发分钟",
-        "type": "int",
-        "hint": "0 表示整点触发；15 表示每小时 xx:15 触发。",
-        "slider": { "min": 0, "max": 59, "step": 1 },
-        "default": 0
-      },
-      "lol_query_match_count": {
-        "description": "单次查询默认场次",
-        "type": "int",
-        "hint": "命令查询默认返回最近几场战绩。",
-        "slider": { "min": 1, "max": 10, "step": 1 },
-        "default": 3
-      },
-      "lol_subscription_push_limit": {
-        "description": "订阅每次最多推送新对局数",
-        "type": "int",
-        "hint": "检测到有多场新对局时，单次推送的上限，避免刷屏。",
-        "slider": { "min": 1, "max": 5, "step": 1 },
-        "default": 3
-      },
-      "lol_api_timeout_seconds": {
-        "description": "LoL API 请求超时（秒）",
-        "type": "int",
-        "hint": "腾讯服战绩查询、订阅轮询都会使用此超时。",
-        "slider": { "min": 5, "max": 60, "step": 1 },
-        "default": 12
-      }
-    }
-  },
-  "fund": {
-    "description": "基金分析",
-    "hint": "基金智能分析专用模型等。",
-    "type": "object",
-    "items": {
-      "fund_ai_provider_id": {
-        "description": "基金智能分析模型提供商",
+      "email_subscription_topics": {
+        "description": "可订阅项（逗号分隔）",
         "type": "string",
-        "_special": "select_provider",
-        "hint": "推荐直接选择 AstrBot 中已配置的聊天模型提供商。若仍配置了下方“基金智能分析服务商”，则继续按旧逻辑优先使用服务商列表。",
+        "hint": "用户可订阅的内容类型，如 新闻,天气,每日摘要。",
+        "default": "新闻,天气,每日摘要"
+      },
+      "email_subscription_default_umo": {
+        "description": "订阅定时发送用 LLM 的会话 ID（可选）",
+        "type": "string",
+        "hint": "留空则尝试默认会话；定时任务生成正文时用该会话的 LLM。",
         "default": ""
-      },
-      "fund_ai_providers": {
-        "description": "基金智能分析服务商（高级兼容方式，可添加多个）",
-        "type": "template_list",
-        "hint": "仅当你想手动填写 OpenAI 兼容接口时使用。按列表顺序尝试，第一个失败则用下一个。",
-        "templates": {
-          "openai_text": {
-            "name": "OpenAI 兼容（文本）",
-            "items": {
-              "base_url": {
-                "type": "string",
-                "description": "API 地址",
-                "hint": "例如 https://api.siliconflow.cn/v1 或其他 OpenAI 兼容地址",
-                "default": "https://api.siliconflow.cn/v1"
-              },
-              "api_keys": {
-                "type": "list",
-                "description": "API Key",
-                "default": [],
-                "obvious_hint": true
-              },
-              "model": {
-                "type": "string",
-                "description": "模型名称",
-                "hint": "例如 Qwen/QwQ、DeepSeek、gpt-4o-mini 等文本模型",
-                "default": "Qwen/Qwen2.5-72B-Instruct"
-              }
-            }
-          }
-        }
-      },
-      "fund_ai_timeout_seconds": {
-        "description": "基金智能分析模型超时（秒）",
-        "type": "int",
-        "hint": "基金智能分析调用大模型的最大等待时间。模型较慢或走海外接口时可适当调大。",
-        "slider": { "min": 30, "max": 300, "step": 5 },
-        "default": 90
-      }
-    }
-  },
-  "weather": {
-    "description": "全球天气查询（默认 Open-Meteo）",
-    "hint": "默认使用 Open-Meteo，支持全球城市天气、1-7 天预报和今天/明天/周几等自然语言时间；保留旧版自定义 API 兼容入口。",
-    "type": "object",
-    "items": {
-      "weather_api_url": {
-        "description": "兼容旧版的自定义天气 API 地址",
-        "type": "string",
-        "hint": "留空时自动使用 Open-Meteo；仅当你要接入旧版或自定义天气接口时再填写。",
-        "default": ""
-      },
-      "weather_forecast_api_url": {
-        "description": "Open-Meteo 预报 API 地址",
-        "type": "string",
-        "hint": "默认即可，除非你需要自托管或商业保留端点。",
-        "default": "https://api.open-meteo.com/v1/forecast"
-      },
-      "weather_geocoding_api_url": {
-        "description": "Open-Meteo 地理编码 API 地址",
-        "type": "string",
-        "hint": "用于把城市名解析成经纬度，默认支持全球城市搜索。",
-        "default": "https://geocoding-api.open-meteo.com/v1/search"
-      },
-      "weather_default_format": {
-        "description": "默认返回格式",
-        "type": "string",
-        "options": ["text", "image"],
-        "hint": "默认推荐 text。Open-Meteo 返回文本；若你接的是旧版自定义图片天气 API，可切到 image。",
-        "default": "text"
       }
     }
   },
   "memory": {
-    "description": "记忆增强与记忆面板",
-    "hint": "控制被动记忆、事件回忆和本地记忆管理面板。",
+    "description": "记忆增强：长期记忆与管理面板",
+    "hint": "常用项是管理员 QQ、记忆面板地址与端口、事件回忆开关，以及记忆注入预算。",
     "type": "object",
     "items": {
       "memory_panel_enabled": {
@@ -371,7 +728,11 @@
         "description": "记忆面板端口",
         "type": "int",
         "hint": "默认使用 7835，如端口冲突可修改。",
-        "slider": { "min": 1024, "max": 65535, "step": 1 },
+        "slider": {
+          "min": 1024,
+          "max": 65535,
+          "step": 1
+        },
         "default": 7835
       },
       "memory_panel_public_base_url": {
@@ -396,35 +757,51 @@
         "description": "联动回忆最小触发消息长度",
         "type": "int",
         "hint": "消息长度低于该值时，不触发人物联动回忆。建议 6-20。",
-        "slider": { "min": 1, "max": 200, "step": 1 },
+        "slider": {
+          "min": 1,
+          "max": 200,
+          "step": 1
+        },
         "default": 8
       },
       "memory_observe_user_throttle_seconds": {
         "description": "用户识别写库节流秒数",
         "type": "int",
         "hint": "同一用户在节流窗口内不重复写入 user 表；昵称变化会立即写入。0 表示关闭节流。",
-        "slider": { "min": 0, "max": 3600, "step": 1 },
+        "slider": {
+          "min": 0,
+          "max": 3600,
+          "step": 1
+        },
         "default": 120
       },
       "memory_related_memory_cache_ttl_seconds": {
         "description": "相关人物检索缓存有效期（秒）",
         "type": "int",
         "hint": "用于缓存相关人物检索索引。数值越大数据库压力越小；0 表示每次都重建索引。",
-        "slider": { "min": 0, "max": 3600, "step": 1 },
+        "slider": {
+          "min": 0,
+          "max": 3600,
+          "step": 1
+        },
         "default": 60
       },
       "memory_prompt_max_chars": {
         "description": "记忆注入最大字符预算",
         "type": "int",
         "hint": "用于限制 on_llm_request 追加到 system_prompt 的记忆内容上限，避免提示词过长。",
-        "slider": { "min": 400, "max": 12000, "step": 50 },
+        "slider": {
+          "min": 400,
+          "max": 12000,
+          "step": 50
+        },
         "default": 1800
       }
     }
   },
   "slang": {
-    "description": "群聊黑话学习",
-    "hint": "学习当前群聊 / 当前私聊里的特殊说法，并在相关对话时自动补充解释。",
+    "description": "记忆增强：群聊黑话",
+    "hint": "控制黑话词典是否启用、是否自动学习，以及每次给模型补充多少条黑话解释。",
     "type": "object",
     "items": {
       "slang_enabled": {
@@ -449,263 +826,18 @@
         "description": "单次最多注入黑话条数",
         "type": "int",
         "hint": "当前消息命中了黑话，或明显在问“什么意思/这个梗啥意思”时，最多注入多少条解释。",
-        "slider": { "min": 1, "max": 12, "step": 1 },
+        "slider": {
+          "min": 1,
+          "max": 12,
+          "step": 1
+        },
         "default": 5
       }
     }
   },
-  "proactive": {
-    "description": "主动消息发送",
-    "hint": "用于配置式主动消息：直接填写私聊 QQ 列表、群号列表和 24 小时时段规则，无需再用命令绑定目标。",
-    "type": "object",
-    "items": {
-      "proactive_enabled": {
-        "description": "启用配置式主动消息",
-        "type": "bool",
-        "hint": "开启后会按下方的 QQ 列表、群号列表和时段规则自动主动发消息。",
-        "default": false
-      },
-      "proactive_admin_qq_ids": {
-        "description": "主动消息管理员 QQ 列表",
-        "type": "list",
-        "hint": "只有这些管理员可以使用 `/主动消息` 与主动消息 LLM 工具；留空时会回退使用 `memory_admin_qq_ids`。配置式自动发送本身不依赖手动命令。",
-        "default": []
-      },
-      "proactive_private_qq_ids": {
-        "description": "主动私聊 QQ 列表",
-        "type": "list",
-        "hint": "配置 bot 需要主动私聊发送的 QQ 号列表，例如 123456789。",
-        "default": []
-      },
-      "proactive_group_ids": {
-        "description": "主动群聊群号列表",
-        "type": "list",
-        "hint": "配置 bot 需要主动群发消息的 QQ 群号列表。",
-        "default": []
-      },
-      "proactive_timezone": {
-        "description": "主动消息时区",
-        "type": "string",
-        "hint": "例如 Asia/Shanghai。时段规则会按这个时区执行。",
-        "default": "Asia/Shanghai"
-      },
-      "proactive_send_platform": {
-        "description": "主动消息发送平台",
-        "type": "string",
-        "options": ["aiocqhttp"],
-        "hint": "当前按 QQ 号 / 群号直发仅支持 aiocqhttp。",
-        "default": "aiocqhttp"
-      },
-      "proactive_llm_umo": {
-        "description": "主动消息生成用会话 ID",
-        "type": "string",
-        "hint": "仅在时段规则里填写了 prompt_template 时使用；留空则只发送固定文案 message_text。",
-        "default": ""
-      },
-      "proactive_time_slots": {
-        "description": "24 小时时段规则",
-        "type": "template_list",
-        "hint": "每条规则会在设定的开始小时到结束小时之间，于指定分钟触发一次；如果跨度覆盖多个小时，就会每个小时触发一次。",
-        "templates": {
-          "time_slot_rule": {
-            "name": "主动消息时段规则",
-            "items": {
-              "name": {
-                "type": "string",
-                "description": "规则名称",
-                "hint": "仅用于区分和查看日志，例如：早安问候、午间提醒。",
-                "default": "主动消息规则"
-              },
-              "enabled": {
-                "type": "bool",
-                "description": "启用该规则",
-                "default": true
-              },
-              "target_scope": {
-                "type": "string",
-                "description": "发送对象类型",
-                "options": ["both", "private", "group"],
-                "hint": "both=同时发给私聊 QQ 列表和群号列表；private=只发私聊；group=只发群。",
-                "default": "both"
-              },
-              "start_hour": {
-                "type": "int",
-                "description": "开始小时",
-                "hint": "24 小时制，0-23。支持跨天，例如开始 22、结束 2。",
-                "slider": { "min": 0, "max": 23, "step": 1 },
-                "default": 9
-              },
-              "end_hour": {
-                "type": "int",
-                "description": "结束小时",
-                "hint": "24 小时制，0-23，按包含结束小时处理。",
-                "slider": { "min": 0, "max": 23, "step": 1 },
-                "default": 23
-              },
-              "minute": {
-                "type": "int",
-                "description": "触发分钟",
-                "hint": "每到命中的小时，会在这个分钟触发，例如填 0 就是整点触发。",
-                "slider": { "min": 0, "max": 59, "step": 1 },
-                "default": 0
-              },
-              "message_text": {
-                "type": "text",
-                "description": "固定发送文案",
-                "hint": "可直接填写最终发送内容。支持占位符：{now} {date} {time} {hour} {minute} {weekday} {slot_name} {target_type} {target_id}。",
-                "editor_mode": true,
-                "editor_language": "text",
-                "default": ""
-              },
-              "prompt_template": {
-                "type": "text",
-                "description": "LLM 生成提示词",
-                "hint": "可选。填写后会用 proactive_llm_umo 对应的模型生成最终文案；留空则直接发送上面的固定文案。",
-                "editor_mode": true,
-                "editor_language": "text",
-                "default": ""
-              }
-            }
-          }
-        },
-        "default": []
-      }
-    }
-  },
-  "jrys": {
-    "description": "今日运势",
-    "hint": "关键词触发、节假日爆率、固定当日运势与缓存。",
-    "type": "object",
-    "items": {
-      "jrys_keyword_enabled": {
-        "description": "启用关键词触发",
-        "type": "bool",
-        "hint": "开启后输入 jrys / 今日运势 / 运势 均可触发今日运势查询。",
-        "default": true
-      },
-      "jrys_holiday_rates_enabled": {
-        "description": "启用节假日爆率调整",
-        "type": "bool",
-        "hint": "开启后在指定节假日会提高“好运”权重。",
-        "default": true
-      },
-      "jrys_fixed_daily_fortune": {
-        "description": "固定当日运势",
-        "type": "bool",
-        "hint": "开启后同一用户在同一天多次查询时运势结果保持一致。",
-        "default": true
-      },
-      "jrys_holidays": {
-        "description": "节假日日期列表",
-        "type": "list",
-        "hint": "用于节假日爆率调整的日期，格式 MM-DD，例如 02-14。",
-        "default": ["01-01", "02-14", "05-01", "10-01", "12-25"]
-      },
-      "jrys_avatar_cache_expiration": {
-        "description": "头像缓存过期时间（秒）",
-        "type": "int",
-        "hint": "头像本地缓存的有效期，默认 86400 秒（一天）。",
-        "slider": { "min": 3600, "max": 604800, "step": 3600 },
-        "default": 86400
-      },
-      "jrys_pre_cache_background_images": {
-        "description": "预缓存背景图片",
-        "type": "bool",
-        "hint": "开启后插件加载时预先下载背景图到本地缓存。",
-        "default": false
-      },
-      "jrys_cleanup_background_downloads": {
-        "description": "清理按需下载的背景图",
-        "type": "bool",
-        "hint": "关闭后背景图始终缓存在 data/plugin_data 目录中，不做临时清理。",
-        "default": true
-      }
-    }
-  },
-  "ocr": {
-    "description": "图片文字识别（OCR）",
-    "hint": "推荐先选择下方「OCR 模型提供商」。如果你想手动接 OpenAI 兼容视觉接口，也可以继续使用下方「OCR 服务商」作为兼容兜底。",
-    "type": "object",
-    "items": {
-      "ocr_enabled": {
-        "description": "启用 OCR 功能",
-        "type": "bool",
-        "hint": "关闭后 /识别图片 不响应。",
-        "default": true
-      },
-      "ocr_provider_id": {
-        "description": "OCR 模型提供商",
-        "type": "string",
-        "_special": "select_provider",
-        "hint": "推荐选择 AstrBot 中已配置、且支持视觉输入的模型提供商，例如 gpt-4o-mini、Qwen2-VL 等。留空则使用下方手动填写的 OCR 服务商列表。",
-        "default": ""
-      },
-      "ocr_providers": {
-        "description": "OCR 服务商（高级兼容方式，可添加多个）",
-        "type": "template_list",
-        "hint": "当上方未选择 OCR 模型提供商，或你想手动填写 OpenAI 兼容视觉接口时使用。每项填写 API 地址、API Key、模型名称（需支持视觉输入）。",
-        "templates": {
-          "openai_vision": {
-            "name": "OpenAI 兼容（视觉/多模态）",
-            "items": {
-              "base_url": {
-                "type": "string",
-                "description": "API 地址",
-                "hint": "硅基流动填 https://api.siliconflow.cn/v1；OpenAI 等填对应地址",
-                "default": "https://api.siliconflow.cn/v1"
-              },
-              "api_keys": {
-                "type": "list",
-                "description": "API Key",
-                "default": [],
-                "obvious_hint": true
-              },
-              "model": {
-                "type": "string",
-                "description": "模型名称",
-                "hint": "硅基流动可用 Qwen2-VL-7B-Instruct 等视觉模型；OpenAI 用 gpt-4o-mini",
-                "default": "Qwen2-VL-7B-Instruct"
-              }
-            }
-          }
-        }
-      }
-    }
-  },
-  "animetrace": {
-    "description": "动漫图片识别（AnimeTrace）",
-    "hint": "使用 AnimeTrace API 识别番剧/角色等信息，文档见 https://ai.animedb.cn/zh/api-docs/ 。",
-    "type": "object",
-    "items": {
-      "animetrace_api_url": {
-        "description": "AnimeTrace 接口地址",
-        "type": "string",
-        "hint": "默认使用官方地址：https://api.animetrace.com/v1/search",
-        "default": "https://api.animetrace.com/v1/search"
-      },
-      "animetrace_model": {
-        "description": "识别模型名称",
-        "type": "string",
-        "hint": "参考 AnimeTrace 文档的模型名，如 animetrace_high_beta。",
-        "default": "animetrace_high_beta"
-      },
-      "animetrace_is_multi": {
-        "description": "返回多个候选结果",
-        "type": "bool",
-        "hint": "开启后 is_multi=1，将返回多个匹配结果；关闭则只返回最佳结果。",
-        "default": false
-      },
-      "animetrace_ai_detect": {
-        "description": "开启 AI 图检测",
-        "type": "bool",
-        "hint": "对应 AnimeTrace 的 ai_detect 参数，开启时传 1，关闭时传 2。",
-        "default": true
-      }
-    }
-  },
   "music": {
-    "description": "点歌与音乐播放（兼容原 astrbot_plugin_music 配置）",
-    "hint": "本配置块基本等价于 astrbot_plugin_music 的 _conf_schema，方便从原插件平滑迁移。",
+    "description": "娱乐：点歌与音乐播放",
+    "hint": "包含默认点歌平台、候选数量、发送方式和代理等。大多数情况下只需要改 API 根地址、发送模式和代理。",
     "type": "object",
     "items": {
       "default_player_name": {
@@ -759,7 +891,7 @@
       },
       "send_modes": {
         "description": "发送模式优先级",
-        "hint": "决定发送歌曲方式的优先级，排在前面的模式优先，发送失败时自动尝试下一种。注意：card 仅 QQ 发送网易云音乐时可用。",
+        "hint": "决定发送歌曲方式的优先级，排在前面的模式优先，发送失败时自动尝试下一种。注意：`card` 仅 QQ 发送网易云音乐时可用。",
         "type": "list",
         "options": [
           "card(卡片模式)",
@@ -842,92 +974,63 @@
       }
     }
   },
-  "qianfan_search": {
-    "description": "百度千帆智能搜索与网页搜索",
-    "hint": "/智能搜索、/搜索 使用 X-Appbuilder-Authorization 鉴权；网页搜索结果可自定义交给 LLM 的提示词。",
+  "jrys": {
+    "description": "娱乐：今日运势",
+    "hint": "控制关键词触发、节假日效果、固定运势和素材缓存。大多数情况下保持默认即可。",
     "type": "object",
     "items": {
-      "qianfan_search_ak": {
-        "description": "千帆 API Key",
-        "type": "string",
-        "hint": "百度千帆控制台获取，直接作为 Bearer 鉴权，用于 /智能搜索 与 /搜索。",
-        "obvious_hint": true,
-        "default": ""
+      "jrys_keyword_enabled": {
+        "description": "启用关键词触发",
+        "type": "bool",
+        "hint": "开启后输入 jrys / 今日运势 / 运势 均可触发今日运势查询。",
+        "default": true
       },
-      "qianfan_search_web_prompt": {
-        "description": "网页搜索交给 LLM 的提示词模板",
-        "type": "text",
-        "hint": "占位符：{query}=搜索关键词，{search_results}=原始结果正文。可要求「使用当前人格」并避免奇怪标点。留空用默认。",
-        "obvious_hint": false,
-        "editor_mode": true,
-        "editor_language": "text",
-        "default": "请严格以当前设定的人格与口吻回复。\n以下是一次网页搜索的原始结果，请根据用户的问题或关键词，用简洁、有条理的中文总结并回答。\n使用正常中文标点（如全角逗号、句号、省略号……），不要使用混用或奇怪符号。\n若结果中有链接，可保留重要链接。不要编造未在结果中出现的内容。\n\n用户搜索关键词：{query}\n\n搜索结果：\n{search_results}"
+      "jrys_holiday_rates_enabled": {
+        "description": "启用节假日爆率调整",
+        "type": "bool",
+        "hint": "开启后在指定节假日会提高“好运”权重。",
+        "default": true
       },
-      "qianfan_search_smart_prompt": {
-        "description": "智能搜索交给 LLM 的提示词模板",
-        "type": "text",
-        "hint": "占位符：{smart_search_result}=千帆智能搜索返回的原文。可要求「当前人格」并避免大量*等 Markdown 符号。留空用默认。",
-        "obvious_hint": false,
-        "editor_mode": true,
-        "editor_language": "text",
-        "default": "请严格以当前设定的人格与口吻整理以下智能搜索结果。使用正常中文标点，避免大量星号（*）或 Markdown 符号。直接输出整理后的回答，不要编造内容。\n\n原始结果：\n{smart_search_result}"
-      }
-    }
-  },
-  "email": {
-    "description": "邮件发送（QQ 邮箱）",
-    "hint": "使用 QQ 邮箱 SMTP 发送邮件，需在 QQ 邮箱设置 -> 账户 -> POP3/IMAP 服务 中开启并获取授权码（非登录密码）。",
-    "type": "object",
-    "items": {
-      "email_sender": {
-        "description": "发件人 QQ 邮箱",
-        "type": "string",
-        "hint": "用于发送邮件的 QQ 邮箱地址，例如 123456789@qq.com。",
-        "obvious_hint": true,
-        "default": ""
+      "jrys_fixed_daily_fortune": {
+        "description": "固定当日运势",
+        "type": "bool",
+        "hint": "开启后同一用户在同一天多次查询时运势结果保持一致。",
+        "default": true
       },
-      "email_auth_code": {
-        "description": "QQ 邮箱授权码",
-        "type": "string",
-        "hint": "在 QQ 邮箱网页版 -> 设置 -> 账户 -> POP3/IMAP 服务 中开启服务后获取的授权码，不是 QQ 登录密码。",
-        "obvious_hint": true,
-        "default": ""
+      "jrys_holidays": {
+        "description": "节假日日期列表",
+        "type": "list",
+        "hint": "用于节假日爆率调整的日期，格式 MM-DD，例如 02-14。",
+        "default": [
+          "01-01",
+          "02-14",
+          "05-01",
+          "10-01",
+          "12-25"
+        ]
       },
-      "email_smtp_host": {
-        "description": "SMTP 服务器",
-        "type": "string",
-        "hint": "QQ 邮箱使用 smtp.qq.com，一般无需修改。",
-        "default": "smtp.qq.com"
+      "jrys_avatar_cache_expiration": {
+        "description": "头像缓存过期时间（秒）",
+        "type": "int",
+        "hint": "头像本地缓存的有效期，默认 86400 秒（一天）。",
+        "slider": {
+          "min": 3600,
+          "max": 604800,
+          "step": 3600
+        },
+        "default": 86400
       },
-      "email_smtp_port": {
-        "description": "SMTP 端口",
-        "type": "string",
-        "hint": "QQ 邮箱 SSL 为 465，TLS 为 587。",
-        "default": "465"
+      "jrys_pre_cache_background_images": {
+        "description": "预缓存背景图片",
+        "type": "bool",
+        "hint": "开启后插件加载时预先下载背景图到本地缓存。",
+        "default": false
       },
-      "email_subscription_time": {
-        "description": "邮件订阅每日发送时间",
-        "type": "string",
-        "hint": "格式 时:分，如 08:00 表示每天 8 点发送。",
-        "default": "08:00"
-      },
-      "email_subscription_timezone": {
-        "description": "邮件订阅时区",
-        "type": "string",
-        "hint": "如 Asia/Shanghai。",
-        "default": "Asia/Shanghai"
-      },
-      "email_subscription_topics": {
-        "description": "可订阅项（逗号分隔）",
-        "type": "string",
-        "hint": "用户可订阅的内容类型，如 新闻,天气,每日摘要。",
-        "default": "新闻,天气,每日摘要"
-      },
-      "email_subscription_default_umo": {
-        "description": "订阅定时发送用 LLM 的会话 ID（可选）",
-        "type": "string",
-        "hint": "留空则尝试默认会话；定时任务生成正文时用该会话的 LLM。",
-        "default": ""
+      "jrys_cleanup_background_downloads": {
+        "description": "清理按需下载的背景图",
+        "type": "bool",
+        "hint": "关闭后背景图始终缓存在 data/plugin_data 目录中，不做临时清理。",
+        "default": true
       }
     }
   }

@@ -2,15 +2,13 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from contextlib import contextmanager
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Iterator
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
-from astrbot.api.star import StarTools
 
+from .memory_state_store import get_shared_db_path, shared_conn
 from .memory_utils import UserMemoryStore, init_user_memory_store
 
 _GENERIC_VALUES = {
@@ -135,20 +133,11 @@ class PassiveMemoryStore:
 
     def __init__(self) -> None:
         init_user_memory_store()
-        self._data_dir = Path(StarTools.get_data_dir("astrbot_all_char"))
-        self._data_dir.mkdir(parents=True, exist_ok=True)
-        self._db_path = self._data_dir / self.DB_NAME
+        self._db_path = get_shared_db_path()
         self._init_db()
 
-    @contextmanager
     def _get_conn(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self._db_path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
-        try:
-            yield conn
-        finally:
-            conn.close()
+        return shared_conn()
 
     @staticmethod
     def _now_str() -> str:
@@ -1288,28 +1277,47 @@ class PassiveMemoryStore:
             )
         return {"nodes": nodes, "edges": edges}
 
-    def build_profile_prompt(self, event: AstrMessageEvent) -> str:
-        qq_id = self._get_sender_id(event)
-        if not qq_id:
-            return ""
+    def _collect_profile_prompt_data(self, qq_id: str) -> dict[str, Any]:
         base_entry = init_user_memory_store().get_memory(qq_id) or {}
         existing_aliases = {
             self._normalize_value(alias)
             for alias in (base_entry.get("memory_aliases") or [])
             if self._normalize_value(alias)
         }
-        preferred_names = [
-            item["value"]
-            for item in self._get_preferences(qq_id, preference_type="preferred_name", limit=4, min_confidence=0.55)
-            if self._normalize_value(item.get("value")) not in existing_aliases
-        ]
-        likes = [item["value"] for item in self._get_preferences(qq_id, preference_type="like", limit=4, min_confidence=0.48)]
-        dislikes = [
-            item["value"]
-            for item in self._get_preferences(qq_id, preference_type="dislike", limit=4, min_confidence=0.48)
-        ]
-        relations = self._get_relations(qq_id, limit=5, min_confidence=0.5)
-        habits = self._get_habits(qq_id, limit=8)
+        return {
+            "preferred_names": [
+                item["value"]
+                for item in self._get_preferences(qq_id, preference_type="preferred_name", limit=4, min_confidence=0.55)
+                if self._normalize_value(item.get("value")) not in existing_aliases
+            ],
+            "likes": [item["value"] for item in self._get_preferences(qq_id, preference_type="like", limit=4, min_confidence=0.48)],
+            "dislikes": [
+                item["value"]
+                for item in self._get_preferences(qq_id, preference_type="dislike", limit=4, min_confidence=0.48)
+            ],
+            "relations": self._get_relations(qq_id, limit=5, min_confidence=0.5),
+            "habits": self._get_habits(qq_id, limit=8),
+        }
+
+    def _append_habit_prompt_lines(self, lines: list[str], habits: list[dict[str, Any]]) -> None:
+        habit_lines = [self._format_habit_line(item) for item in habits]
+        habit_lines = [line for line in habit_lines if line]
+        if not habit_lines:
+            return
+        lines.append("- 跨模块习惯:")
+        for line in habit_lines[:5]:
+            lines.append(f"  - {line}")
+
+    def build_profile_prompt(self, event: AstrMessageEvent) -> str:
+        qq_id = self._get_sender_id(event)
+        if not qq_id:
+            return ""
+        prompt_data = self._collect_profile_prompt_data(qq_id)
+        preferred_names = prompt_data["preferred_names"]
+        likes = prompt_data["likes"]
+        dislikes = prompt_data["dislikes"]
+        relations = prompt_data["relations"]
+        habits = prompt_data["habits"]
         if not any((preferred_names, likes, dislikes, relations, habits)):
             return ""
 
@@ -1324,12 +1332,7 @@ class PassiveMemoryStore:
             relation_text = "；".join(f"{item.get('target_name')} = {item.get('relation_type')}" for item in relations[:4])
             if relation_text:
                 lines.append(f"- 关系图谱: {relation_text}")
-        habit_lines = [self._format_habit_line(item) for item in habits]
-        habit_lines = [line for line in habit_lines if line]
-        if habit_lines:
-            lines.append("- 跨模块习惯:")
-            for line in habit_lines[:5]:
-                lines.append(f"  - {line}")
+        self._append_habit_prompt_lines(lines, habits)
         lines.extend(
             [
                 "使用规则:",
@@ -1380,15 +1383,13 @@ class PassiveMemoryStore:
         )
         return "\n".join(lines)
 
-    def build_reminiscence_bridge_prompt(
+    def _collect_reminiscence_people(
         self,
-        context: Any,
         event: AstrMessageEvent,
         *,
-        message_text: str = "",
-        max_people: int = 3,
-        max_events_per_person: int = 2,
-    ) -> str:
+        message_text: str,
+        max_people: int,
+    ) -> list[dict[str, Any]]:
         store = init_user_memory_store()
         qq_id = self._get_sender_id(event)
         sender_name = self._get_sender_name(event)
@@ -1411,7 +1412,7 @@ class PassiveMemoryStore:
             people.append({"label": "当前消息提到的人", "display": display, "terms": self._build_person_terms(entry)})
             seen_people.add(normalized_display)
             if len(people) >= max_people:
-                break
+                return people
 
         for relation in self._search_relation_targets(qq_id, message_text, limit=max_people):
             target_name = str(relation.get("target_name") or "").strip()
@@ -1424,19 +1425,85 @@ class PassiveMemoryStore:
             seen_people.add(normalized_target)
             if len(people) >= max_people:
                 break
+        return people
 
-        if not people:
-            return ""
-
+    @staticmethod
+    def _resolve_reminiscence_backend(context: Any) -> tuple[Any | None, Any | None]:
         try:
             reminiscence = context.get_star("local_reminiscence")
         except Exception:
             reminiscence = None
         if not reminiscence or not getattr(reminiscence, "is_model_ready", lambda: False)():
-            return ""
-
+            return None, None
         vector_db = getattr(reminiscence, "vector_db", None)
         memory_db = getattr(reminiscence, "db", None)
+        if vector_db is None or memory_db is None:
+            return None, None
+        return vector_db, memory_db
+
+    def _search_reminiscence_events_for_person(
+        self,
+        *,
+        vector_db: Any,
+        memory_db: Any,
+        person: dict[str, Any],
+        max_events_per_person: int,
+        seen_events: set[str],
+    ) -> list[dict[str, Any]]:
+        terms = [term for term in person.get("terms") or [] if self._normalize_value(term)]
+        if not terms:
+            return []
+        try:
+            search_results = vector_db.search_events(" ".join(terms[:4]), top_n=6) or []
+        except Exception as exc:
+            logger.debug("[passive_memory] APLR 搜索失败: %s", exc)
+            return []
+
+        person_events: list[dict[str, Any]] = []
+        for result in search_results:
+            event_id = str(result.get("event_id") or "").strip()
+            relevance = float(result.get("relevance") or 0)
+            if not event_id or event_id in seen_events or relevance < 35:
+                continue
+            try:
+                event_row = memory_db.get_event_by_id(event_id)
+            except Exception:
+                event_row = None
+            if not event_row:
+                continue
+            if not self._event_matches_terms(event_row, terms) and relevance < 65:
+                continue
+            person_events.append(
+                {
+                    "event_id": event_id,
+                    "date": str(event_row.get("date") or "").strip(),
+                    "narrative": str(event_row.get("narrative") or "").strip(),
+                    "emotion": str(event_row.get("emotion") or "").strip(),
+                }
+            )
+            seen_events.add(event_id)
+            if len(person_events) >= max_events_per_person:
+                break
+        return person_events
+
+    def build_reminiscence_bridge_prompt(
+        self,
+        context: Any,
+        event: AstrMessageEvent,
+        *,
+        message_text: str = "",
+        max_people: int = 3,
+        max_events_per_person: int = 2,
+    ) -> str:
+        people = self._collect_reminiscence_people(
+            event,
+            message_text=message_text,
+            max_people=max_people,
+        )
+        if not people:
+            return ""
+
+        vector_db, memory_db = self._resolve_reminiscence_backend(context)
         if vector_db is None or memory_db is None:
             return ""
 
@@ -1444,39 +1511,13 @@ class PassiveMemoryStore:
         seen_events: set[str] = set()
         added_any = False
         for person in people:
-            terms = [term for term in person.get("terms") or [] if self._normalize_value(term)]
-            if not terms:
-                continue
-            try:
-                search_results = vector_db.search_events(" ".join(terms[:4]), top_n=6) or []
-            except Exception as exc:
-                logger.debug("[passive_memory] APLR 搜索失败: %s", exc)
-                continue
-            person_events: list[dict[str, Any]] = []
-            for result in search_results:
-                event_id = str(result.get("event_id") or "").strip()
-                relevance = float(result.get("relevance") or 0)
-                if not event_id or event_id in seen_events or relevance < 35:
-                    continue
-                try:
-                    event_row = memory_db.get_event_by_id(event_id)
-                except Exception:
-                    event_row = None
-                if not event_row:
-                    continue
-                if not self._event_matches_terms(event_row, terms) and relevance < 65:
-                    continue
-                person_events.append(
-                    {
-                        "event_id": event_id,
-                        "date": str(event_row.get("date") or "").strip(),
-                        "narrative": str(event_row.get("narrative") or "").strip(),
-                        "emotion": str(event_row.get("emotion") or "").strip(),
-                    }
-                )
-                seen_events.add(event_id)
-                if len(person_events) >= max_events_per_person:
-                    break
+            person_events = self._search_reminiscence_events_for_person(
+                vector_db=vector_db,
+                memory_db=memory_db,
+                person=person,
+                max_events_per_person=max_events_per_person,
+                seen_events=seen_events,
+            )
             if not person_events:
                 continue
             added_any = True

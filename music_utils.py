@@ -8,6 +8,7 @@ import aiohttp
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.star import Context
+from .shared_http_utils import get_shared_http_session
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.message.components import File, Record
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
@@ -95,33 +96,37 @@ async def _http_request_json(
     logger.info("[music] 请求 URL: %s", url)
     try:
         timeout = aiohttp.ClientTimeout(total=10)
-        async with aiohttp.ClientSession(
-            timeout=timeout,
+        session = await get_shared_http_session("music")
+        request = session.post if str(method).upper() == "POST" else session.get
+        async with request(
+            url,
+            data=data,
+            proxy=proxy or None,
+            cookies=cookies,
             headers=headers,
-        ) as session:
-            request = session.post if str(method).upper() == "POST" else session.get
-            async with request(url, data=data, proxy=proxy or None, cookies=cookies) as resp:
-                text = await resp.text()
-                if resp.status != 200:
-                    logger.warning(
-                        "[music] 接口返回非 200：status=%s body_prefix=%s",
-                        resp.status,
-                        (text or "")[:200],
-                    )
-                    return None
-                if not text:
-                    return None
-                try:
-                    return await resp.json()
-                except Exception:
-                    # 部分兼容实现可能直接返回 JSON 字符串
-                    import json
+            timeout=timeout,
+        ) as resp:
+            text = await resp.text()
+            if resp.status != 200:
+                logger.warning(
+                    "[music] 接口返回非 200：status=%s body_prefix=%s",
+                    resp.status,
+                    (text or "")[:200],
+                )
+                return None
+            if not text:
+                return None
+            try:
+                return await resp.json()
+            except Exception:
+                # 部分兼容实现可能直接返回 JSON 字符串
+                import json
 
-                    try:
-                        return json.loads(text)
-                    except Exception:
-                        logger.warning("[music] 解析 JSON 失败，body_prefix=%s", text[:200])
-                        return None
+                try:
+                    return json.loads(text)
+                except Exception:
+                    logger.warning("[music] 解析 JSON 失败，body_prefix=%s", text[:200])
+                    return None
     except asyncio.TimeoutError:
         logger.error("[music] 请求超时")
         return None

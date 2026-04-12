@@ -1,16 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import sqlite3
-from contextlib import contextmanager
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Iterator
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
-from astrbot.api.star import Context, StarTools
+from astrbot.api.star import Context
+
+from .memory_state_store import get_shared_db_path, shared_conn
 
 
 SCENE_GROUP = "group"
@@ -399,19 +400,11 @@ async def _llm_extract_definition_candidates(
 
 class SlangMemoryStore:
     def __init__(self) -> None:
-        self._data_dir = Path(StarTools.get_data_dir("astrbot_all_char"))
-        self._data_dir.mkdir(parents=True, exist_ok=True)
-        self._db_path = self._data_dir / _DB_NAME
+        self._db_path = get_shared_db_path()
         self._init_db()
 
-    @contextmanager
     def _get_conn(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self._db_path)
-        conn.row_factory = sqlite3.Row
-        try:
-            yield conn
-        finally:
-            conn.close()
+        return shared_conn()
 
     def _init_db(self) -> None:
         with self._get_conn() as conn:
@@ -763,7 +756,7 @@ def init_slang_store() -> SlangMemoryStore:
 
 async def observe_slang_message(context: Context, event: AstrMessageEvent, config: Any = None) -> None:
     store = init_slang_store()
-    store.observe_message(event, config)
+    await asyncio.to_thread(store.observe_message, event, config)
     if not _is_enabled(config) or not _is_auto_learn_enabled(config) or not _is_llm_auto_learn_enabled(config):
         return
     message_text = _safe_get_message_text(event)
@@ -777,7 +770,8 @@ async def observe_slang_message(context: Context, event: AstrMessageEvent, confi
         return
     llm_candidates = await _llm_extract_definition_candidates(context, event, message_text)
     for item in llm_candidates:
-        result = store.save_term(
+        result = await asyncio.to_thread(
+            store.save_term,
             scene_type,
             scene_value,
             item["term"],

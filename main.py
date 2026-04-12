@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime
+from typing import Any, Awaitable
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -106,10 +107,15 @@ from .slang_utils import (
 from .proactive_message_utils import (
     configure_proactive_admin_qq_ids,
     handle_proactive_message_command,
-    init_proactive_message_center,
     is_proactive_admin_event,
     send_message_to_target,
 )
+from .proactive_auto_chat_utils import (
+    init_proactive_message_center,
+    observe_proactive_incoming_event,
+    observe_proactive_sent_event,
+)
+from .shared_http_utils import close_shared_http_sessions
 
 
 def _get_effective_config(ctx: Context, plugin_config: AstrBotConfig | None) -> AstrBotConfig | dict:
@@ -237,6 +243,23 @@ def _should_trigger_reminiscence(
     return has_temporal and has_action
 
 
+async def _gather_named_prompt_parts(named_awaitables: list[tuple[str, Awaitable[str]]]) -> dict[str, str]:
+    if not named_awaitables:
+        return {}
+    results = await asyncio.gather(
+        *(awaitable for _, awaitable in named_awaitables),
+        return_exceptions=True,
+    )
+    gathered: dict[str, str] = {}
+    for (name, _awaitable), result in zip(named_awaitables, results):
+        if isinstance(result, Exception):
+            logger.warning("[astrbot_all_char] prompt part build failed: part=%s err=%s", name, result)
+            gathered[name] = ""
+            continue
+        gathered[name] = str(result or "").strip()
+    return gathered
+
+
 class _CmdWrappedEvent:
     """包装原始 event，使 get_message_str 返回伪造的指令字符串，便于在 LLM Tool 中复用现有指令 handler。"""
 
@@ -251,6 +274,26 @@ class _CmdWrappedEvent:
 
     def __getattr__(self, name: str):
         return getattr(self._event, name)
+
+
+def _build_registered_function_tools() -> tuple[FunctionTool[AstrAgentContext], ...]:
+    return (
+        StockQueryTool(),
+        LolQueryTool(),
+        WeatherQueryTool(),
+        TrainQueryTool(),
+        SimpleReminderTool(),
+        BookkeepingAddExpenseTool(),
+        BookkeepingAddIncomeTool(),
+        BookkeepingSummaryTool(),
+        SmartSearchTool(),
+        WebSearchTool(),
+        AnimeTraceTool(),
+        MusicPlayTool(),
+        SendEmailTool(),
+        SlangExplainTool(),
+        ProactiveSendMessageTool(),
+    )
 
 
 class AllCharPlugin(Star):
@@ -270,8 +313,15 @@ class AllCharPlugin(Star):
         super().__init__(context)
         self.context = context
         self.config = ensure_flat_config(config)
+        self._background_tasks: set[asyncio.Task[Any]] = set()
         AllCharPlugin._shared_config = self.config
         logger.info("astrbot_all_char 插件初始化完成（命令 + LLM 工具模式）")
+        self._initialize_runtime_components()
+        self._register_function_tools()
+
+    # ---------------- 内部辅助 ----------------
+
+    def _initialize_runtime_components(self) -> None:
         # 初始化简易提醒的持久化调度中心，保证重启后可自动恢复未到期提醒
         init_simple_reminder_center(self.context, self.config)
         # 初始化邮件订阅定时发送中心（持久化订阅 + 每日到点发送）
@@ -293,40 +343,184 @@ class AllCharPlugin(Star):
         init_slang_store()
         maybe_autostart_memory_panel(self.context, self.config)
 
-        # 注册一批可供 Agent 自动调用的工具（类似 astrbot_plugin_payqr）
+    def _register_function_tools(self) -> None:
         try:
-            self.context.add_llm_tools(
-                StockQueryTool(),
-                LolQueryTool(),
-                WeatherQueryTool(),
-                SimpleReminderTool(),
-                BookkeepingAddExpenseTool(),
-                BookkeepingAddIncomeTool(),
-                BookkeepingSummaryTool(),
-                SmartSearchTool(),
-                WebSearchTool(),
-                AnimeTraceTool(),
-                MusicPlayTool(),
-                SendEmailTool(),
-                SlangExplainTool(),
-                ProactiveSendMessageTool(),
-            )
+            tools = _build_registered_function_tools()
+            self.context.add_llm_tools(*tools)
             logger.info(
-                "astrbot_all_char 已注册 LLM 工具：股票、天气、火车票、提醒、记账、智能搜索/网页搜索、动漫识别、点歌、发邮件、黑话解释、主动消息等"
+                "astrbot_all_char 已注册 LLM 工具：%s",
+                "、".join(tool.name for tool in tools),
             )
         except Exception as e:
             logger.error("astrbot_all_char 注册 LLM 工具失败: %s", e)
+
+    async def _forward_results(
+        self,
+        iterator: Any,
+        *,
+        stop_event: AstrMessageEvent | None = None,
+    ):
+        if stop_event is not None:
+            stop_event.stop_event()
+        async for result in iterator:
+            yield result
+
+    @staticmethod
+    def _wrap_fake_command_event(event: AstrMessageEvent, fake_message: str) -> _CmdWrappedEvent:
+        return _CmdWrappedEvent(event, fake_message)
+
+    async def _forward_fake_command_results(
+        self,
+        event: AstrMessageEvent,
+        fake_message: str,
+        handler: Any,
+        *handler_args: Any,
+    ):
+        wrapped = self._wrap_fake_command_event(event, fake_message)
+        async for result in self._forward_results(handler(wrapped, *handler_args)):
+            yield result
+
+    def _build_tool_context_wrapper(self) -> ContextWrapper[AstrAgentContext]:
+        return ContextWrapper[AstrAgentContext](self.context)  # type: ignore[type-arg]
+
+    async def _run_tool_call(
+        self,
+        tool: FunctionTool[AstrAgentContext],
+        **kwargs: Any,
+    ) -> ToolExecResult:
+        return await tool.call(self._build_tool_context_wrapper(), **kwargs)
+
+    def _get_memory_injection_config(self) -> tuple[int, int, bool, bool]:
+        memory_prompt_max_chars = _to_int_in_range(
+            getattr(self.config, "memory_prompt_max_chars", 1800),
+            default=1800,
+            minimum=400,
+            maximum=12000,
+        )
+        reminiscence_min_message_length = _to_int_in_range(
+            getattr(self.config, "memory_reminiscence_min_message_length", 8),
+            default=8,
+            minimum=1,
+            maximum=200,
+        )
+        event_recall_enabled = bool(getattr(self.config, "memory_event_recall_enabled", True))
+        reminiscence_enabled = bool(getattr(self.config, "memory_reminiscence_enabled", True))
+        return (
+            memory_prompt_max_chars,
+            reminiscence_min_message_length,
+            event_recall_enabled,
+            reminiscence_enabled,
+        )
+
+    def _schedule_memory_learning_tasks(self, event: AstrMessageEvent, passive_store: Any) -> None:
+        self._schedule_background_call("passive_memory.observe_message", passive_store.observe_message, event)
+        self._schedule_background_coro(
+            "slang.observe_message",
+            observe_slang_message(self.context, event, self.config),
+        )
+
+    def _build_memory_prompt_jobs(
+        self,
+        *,
+        store: Any,
+        passive_store: Any,
+        event: AstrMessageEvent,
+        message_text: str,
+        qq_id: str,
+        event_recall_enabled: bool,
+    ) -> list[tuple[str, Awaitable[str]]]:
+        prompt_jobs: list[tuple[str, Awaitable[str]]] = [
+            ("memory_prompt", asyncio.to_thread(store.build_prompt_for_event, event)),
+            ("passive_profile_prompt", asyncio.to_thread(passive_store.build_profile_prompt, event)),
+            ("slang_prompt", asyncio.to_thread(build_slang_prompt_for_event, event, message_text, self.config)),
+            (
+                "related_prompt",
+                asyncio.to_thread(
+                    store.build_related_memories_prompt,
+                    message_text,
+                    exclude_qq_ids={qq_id} if qq_id else None,
+                ),
+            ),
+        ]
+        if event_recall_enabled:
+            prompt_jobs.append(
+                (
+                    "event_recall_prompt",
+                    asyncio.to_thread(
+                        passive_store.build_event_recall_prompt,
+                        event,
+                        message_text=message_text,
+                    ),
+                )
+            )
+        return prompt_jobs
+
+    @staticmethod
+    def _join_system_prompt(base_prompt: str, extra_prompt: str) -> str:
+        joiner = "\n\n" if base_prompt else ""
+        return f"{base_prompt}{joiner}{extra_prompt}"
+
+    @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE)
+    async def observe_proactive_private_message(self, event: AstrMessageEvent):
+        await observe_proactive_incoming_event(event, self.context, self.config)
+
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
+    async def observe_proactive_group_message(self, event: AstrMessageEvent):
+        await observe_proactive_incoming_event(event, self.context, self.config)
+
+    @filter.after_message_sent()
+    async def observe_proactive_after_message_sent(self, event: AstrMessageEvent):
+        await observe_proactive_sent_event(event, self.context, self.config)
+
+    def _track_background_task(self, task: asyncio.Task[Any], label: str) -> None:
+        self._background_tasks.add(task)
+
+        def _on_done(done_task: asyncio.Task[Any]) -> None:
+            self._background_tasks.discard(done_task)
+            if done_task.cancelled():
+                return
+            try:
+                exc = done_task.exception()
+            except Exception as callback_exc:
+                logger.warning(
+                    "[astrbot_all_char] background task callback failed: task=%s err=%s",
+                    label,
+                    callback_exc,
+                )
+                return
+            if exc is not None:
+                logger.warning("[astrbot_all_char] background task failed: task=%s err=%s", label, exc)
+
+        task.add_done_callback(_on_done)
+
+    def _schedule_background_coro(self, label: str, coro: Awaitable[Any]) -> None:
+        task = asyncio.create_task(coro)
+        self._track_background_task(task, label)
+
+    def _schedule_background_call(self, label: str, func: Any, *args: Any) -> None:
+        self._schedule_background_coro(label, asyncio.to_thread(func, *args))
+
+    async def _cancel_background_tasks(self) -> None:
+        open_tasks = list(self._background_tasks)
+        for task in open_tasks:
+            task.cancel()
+        if open_tasks:
+            await asyncio.gather(*open_tasks, return_exceptions=True)
+
+    async def terminate(self) -> None:
+        await self._cancel_background_tasks()
+        await close_shared_http_sessions()
 
     # ---------------- 火车票 ----------------
 
     @filter.command("train", alias={"火车票", "车票", "查火车票"})
     async def cmd_train(self, event: AstrMessageEvent):
-        async for result in handle_train_command(event, self.config):
+        async for result in self._forward_results(handle_train_command(event, self.config)):
             yield result
 
     @filter.command("help_train", alias={"火车票帮助"})
     async def cmd_train_help(self, event: AstrMessageEvent):
-        async for result in handle_train_help(event):
+        async for result in self._forward_results(handle_train_help(event)):
             yield result
 
     # ---------------- 智能定时任务（/rmd 命令组入口） ----------------
@@ -339,7 +533,7 @@ class AllCharPlugin(Star):
         说明：原插件通过 command_group 定义子命令；
         在整合版中，统一从这里解析并委托给 sy_scheduler_utils 处理。
         """
-        async for result in handle_sy_rmd_group(event, self.context, self.config):
+        async for result in self._forward_results(handle_sy_rmd_group(event, self.context, self.config)):
             yield result
 
     @filter.command("rmdg", alias=set())
@@ -347,7 +541,7 @@ class AllCharPlugin(Star):
         """
         远程群聊提醒命令入口，对应原插件的 /rmdg 指令组。
         """
-        async for result in handle_sy_rmd_group(event, self.context, self.config):
+        async for result in self._forward_results(handle_sy_rmd_group(event, self.context, self.config)):
             yield result
 
     @filter.command("提醒", alias={"提醒事项"})
@@ -360,7 +554,7 @@ class AllCharPlugin(Star):
         - /提醒 3分钟后提醒我喝水
         - /提醒 08:30 上班打卡
         """
-        async for result in handle_simple_reminder(event, self.context, self.config):
+        async for result in self._forward_results(handle_simple_reminder(event, self.context, self.config)):
             yield result
 
     @filter.command("提醒列表", alias={"我的提醒", "查看提醒"})
@@ -368,77 +562,87 @@ class AllCharPlugin(Star):
         """
         查看当前用户在当前会话中的待执行提醒列表。
         """
-        wrapped = _CmdWrappedEvent(event, "/提醒 列表")
-        async for result in handle_simple_reminder(wrapped, self.context, self.config):
+        async for result in self._forward_fake_command_results(
+            event,
+            "/提醒 列表",
+            handle_simple_reminder,
+            self.context,
+            self.config,
+        ):
             yield result
 
     @filter.command("主动消息", alias={"主动发送", "主动推送"})
     async def cmd_proactive_message(self, event: AstrMessageEvent):
-        async for result in handle_proactive_message_command(event, self.context, self.config):
+        async for result in self._forward_results(
+            handle_proactive_message_command(event, self.context, self.config)
+        ):
             yield result
 
     # ---------------- 用户永久记忆 ----------------
 
     @filter.command("记忆", alias={"认人"})
     async def cmd_memory(self, event: AstrMessageEvent):
-        async for result in handle_memory_command(event):
+        async for result in self._forward_results(handle_memory_command(event)):
             yield result
 
     @filter.command("我是谁")
     async def cmd_who_am_i(self, event: AstrMessageEvent):
-        async for result in handle_who_am_i_command(event):
+        async for result in self._forward_results(handle_who_am_i_command(event)):
             yield result
 
     @filter.command("记忆面板", alias={"memory_panel", "记忆管理"})
     async def cmd_memory_panel(self, event: AstrMessageEvent):
-        async for result in handle_memory_panel_command(event, self.context, self.config):
+        async for result in self._forward_results(handle_memory_panel_command(event, self.context, self.config)):
             yield result
 
     @filter.command("黑话", alias={"黑话词典", "群黑话"})
     async def cmd_slang(self, event: AstrMessageEvent):
-        async for result in handle_slang_command(event, self.config):
+        async for result in self._forward_results(handle_slang_command(event, self.config)):
             yield result
 
     # ---------------- 股票 ----------------
 
     @filter.command("stock", alias={"股票", "自选股", "行情"})
     async def cmd_stock(self, event: AstrMessageEvent):
-        # 避免长耗时股票分析在后台执行时，同一条消息又继续走自然语言链路。
-        event.stop_event()
-        async for result in handle_stock_command(event, self.context, self.config):
+        async for result in self._forward_results(
+            handle_stock_command(event, self.context, self.config),
+            stop_event=event,
+        ):
             yield result
 
     @filter.command("lol", alias={"LOL", "英雄联盟", "联盟战绩"})
     async def cmd_lol(self, event: AstrMessageEvent):
-        # 避免命令与自然语言链路同时回复
-        event.stop_event()
-        async for result in handle_lol_command(event, self.context, self.config):
+        async for result in self._forward_results(
+            handle_lol_command(event, self.context, self.config),
+            stop_event=event,
+        ):
             yield result
 
     @filter.command("基金", alias={"fund"})
     async def cmd_fund(self, event: AstrMessageEvent):
-        async for result in handle_fund_command(event, self.context):
+        async for result in self._forward_results(handle_fund_command(event, self.context)):
             yield result
 
     # ---------------- 天气 ----------------
 
     @filter.command("nyweather", alias={"天气", "天气查询", "查天气"})
     async def cmd_weather(self, event: AstrMessageEvent):
-        # 避免同一消息再走自然语言导致回复两次
-        event.stop_event()  # 避免同一消息再走自然语言导致回复两次
-        async for result in handle_weather_command(event, self.config):
+        async for result in self._forward_results(
+            handle_weather_command(event, self.config),
+            stop_event=event,
+        ):
             yield result
 
     @filter.command("help_nyweather", alias={"天气帮助"})
     async def cmd_weather_help(self, event: AstrMessageEvent):
-        async for result in handle_weather_help(event):
+        async for result in self._forward_results(handle_weather_help(event)):
             yield result
 
     # ---------------- OCR 图片识别 ----------------
 
     @filter.command("识别图片", alias={"ocr", "图片识别"})
     async def cmd_ocr(self, event: AstrMessageEvent):
-        async for result in handle_ocr_command(event, self.config, self.context):
+        async for result in self._forward_results(handle_ocr_command(event, self.config, self.context)):
             yield result
 
     # ---------------- 动漫图片识别（AnimeTrace） ----------------
@@ -449,7 +653,7 @@ class AllCharPlugin(Star):
         使用 AnimeTrace 识别动漫图片（番剧 / 角色 / 截图来源）。
         请在同一条消息中附带一张图片。
         """
-        async for result in handle_animetrace_command(event, self.config):
+        async for result in self._forward_results(handle_animetrace_command(event, self.config)):
             yield result
 
     @filter.llm_tool(name="anime_trace")
@@ -464,63 +668,61 @@ class AllCharPlugin(Star):
         Args:
             image(string): 图片的 URL 或本地路径（可选）。留空时自动从当前消息中提取第一张图片。
         """
-        ctx_wrapper = ContextWrapper[AstrAgentContext](self.context)  # type: ignore[type-arg]
-        tool = AnimeTraceTool()
-        result = await tool.call(ctx_wrapper, image=image)
+        result = await self._run_tool_call(AnimeTraceTool(), image=image)
         yield event.plain_result(str(result))
 
     # ---------------- 记账 ----------------
 
     @filter.command("记账支出")
     async def cmd_book_expense(self, event: AstrMessageEvent):
-        async for result in handle_bookkeeping_expense(event, self.context, self.config):
+        async for result in self._forward_results(handle_bookkeeping_expense(event, self.context, self.config)):
             yield result
 
     @filter.command("记账收入")
     async def cmd_book_income(self, event: AstrMessageEvent):
-        async for result in handle_bookkeeping_income(event, self.context, self.config):
+        async for result in self._forward_results(handle_bookkeeping_income(event, self.context, self.config)):
             yield result
 
     @filter.command("查账统计")
     async def cmd_book_summary(self, event: AstrMessageEvent):
-        async for result in handle_bookkeeping_summary(event, self.context, self.config):
+        async for result in self._forward_results(handle_bookkeeping_summary(event, self.context, self.config)):
             yield result
 
     @filter.command("日统计")
     async def cmd_book_daily(self, event: AstrMessageEvent):
-        async for result in handle_bookkeeping_daily(event, self.context, self.config):
+        async for result in self._forward_results(handle_bookkeeping_daily(event, self.context, self.config)):
             yield result
 
     @filter.command("月统计")
     async def cmd_book_monthly(self, event: AstrMessageEvent):
-        async for result in handle_bookkeeping_monthly(event, self.context, self.config):
+        async for result in self._forward_results(handle_bookkeeping_monthly(event, self.context, self.config)):
             yield result
 
     @filter.command("查账详情")
     async def cmd_book_details(self, event: AstrMessageEvent):
-        async for result in handle_bookkeeping_details(event, self.context, self.config):
+        async for result in self._forward_results(handle_bookkeeping_details(event, self.context, self.config)):
             yield result
 
     @filter.command("按类统计")
     async def cmd_book_by_category(self, event: AstrMessageEvent):
-        async for result in handle_bookkeeping_by_category(event, self.context, self.config):
+        async for result in self._forward_results(handle_bookkeeping_by_category(event, self.context, self.config)):
             yield result
 
     @filter.command("删除账单")
     async def cmd_book_delete(self, event: AstrMessageEvent):
-        async for result in handle_bookkeeping_delete(event, self.context, self.config):
+        async for result in self._forward_results(handle_bookkeeping_delete(event, self.context, self.config)):
             yield result
 
     # ---------------- 今日运势 ----------------
 
     @filter.command("jrys", alias={"今日运势", "运势"})
     async def cmd_jrys(self, event: AstrMessageEvent):
-        async for result in handle_jrys_command(event, self.context, self.config):
+        async for result in self._forward_results(handle_jrys_command(event, self.context, self.config)):
             yield result
 
     @filter.command("jrys_last")
     async def cmd_jrys_last(self, event: AstrMessageEvent):
-        async for result in handle_jrys_last_command(event, self.context, self.config):
+        async for result in self._forward_results(handle_jrys_last_command(event, self.context, self.config)):
             yield result
 
     # ---------------- 百度千帆智能搜索 / 网页搜索 ----------------
@@ -530,7 +732,7 @@ class AllCharPlugin(Star):
         """
         /智能搜索 <问题>：千帆智能搜索后由当前 LLM 整理输出。每日限 100 次。
         """
-        async for result in handle_smart_search_command(event, self.context, self.config):
+        async for result in self._forward_results(handle_smart_search_command(event, self.context, self.config)):
             yield result
 
     @filter.command("搜索")
@@ -538,7 +740,7 @@ class AllCharPlugin(Star):
         """
         /搜索 <关键词>：千帆网页搜索后由当前 LLM 整理输出。每日限 1000 次。
         """
-        async for result in handle_web_search_command(event, self.context, self.config):
+        async for result in self._forward_results(handle_web_search_command(event, self.context, self.config)):
             yield result
 
     # ---------------- 邮件发送（QQ 邮箱） ----------------
@@ -549,7 +751,7 @@ class AllCharPlugin(Star):
         /发邮件 <收件人邮箱> <内容描述>
         使用 QQ 邮箱发送邮件，邮件主题与正文会由 LLM 基于描述生成。
         """
-        async for result in handle_send_email_command(event, self.context, self.config):
+        async for result in self._forward_results(handle_send_email_command(event, self.context, self.config)):
             yield result
 
     @filter.command("发邮件到", alias={"发到邮箱", "发送到邮箱"})
@@ -558,7 +760,7 @@ class AllCharPlugin(Star):
         发邮件到 <邮箱> <内容描述>：用 LLM 根据描述生成主题与正文并发送，走命令管道优先于主对话。
         示例：发邮件到 1102025067@qq.com 今天晚饭
         """
-        async for result in handle_send_email_to_command(event, self.context, self.config):
+        async for result in self._forward_results(handle_send_email_to_command(event, self.context, self.config)):
             yield result
 
     @filter.regex(r"(?:发邮件到|发到邮箱|发送到邮箱|发送邮件\s*到)\s*[^\s@]+@[^\s@]+\.[^\s@]+\s+.+", priority=9999)
@@ -566,7 +768,7 @@ class AllCharPlugin(Star):
         """
         消息任意位置出现「发邮件到 邮箱 内容」或「发到邮箱 邮箱 内容」时解析并发信（如：xxx，发邮件到 xxx@qq.com 今天晚饭）。
         """
-        async for result in handle_send_email_to_in_message(event, self.context, self.config):
+        async for result in self._forward_results(handle_send_email_to_in_message(event, self.context, self.config)):
             yield result
 
     @filter.regex(r"邮件", priority=9998)
@@ -574,7 +776,7 @@ class AllCharPlugin(Star):
         """
         检测到消息含「邮件」且含邮箱地址时：用 LLM 生成主题与正文并发送。
         """
-        async for result in handle_email_intent(event, self.context, self.config):
+        async for result in self._forward_results(handle_email_intent(event, self.context, self.config)):
             yield result
 
     # ---------------- 邮件订阅（持久化 + 每日定时发送） ----------------
@@ -582,19 +784,19 @@ class AllCharPlugin(Star):
     @filter.command("订阅邮件", alias={"邮件订阅"})
     async def cmd_email_subscribe(self, event: AstrMessageEvent):
         """订阅邮件 <订阅项> <收件邮箱>，每日到点发送。示例：订阅邮件 新闻 xxx@qq.com"""
-        async for result in handle_subscribe_command(event, self.context, self.config):
+        async for result in self._forward_results(handle_subscribe_command(event, self.context, self.config)):
             yield result
 
     @filter.command("取消邮件订阅", alias={"邮件退订"})
     async def cmd_email_unsubscribe(self, event: AstrMessageEvent):
         """取消邮件订阅 <订阅项>。示例：取消邮件订阅 新闻"""
-        async for result in handle_unsubscribe_command(event, self.config):
+        async for result in self._forward_results(handle_unsubscribe_command(event, self.config)):
             yield result
 
     @filter.command("我的邮件订阅", alias={"邮件订阅列表"})
     async def cmd_email_subscription_list(self, event: AstrMessageEvent):
         """查看当前用户的邮件订阅列表。"""
-        async for result in handle_list_subscriptions_command(event, self.config):
+        async for result in self._forward_results(handle_list_subscriptions_command(event, self.config)):
             yield result
 
     @filter.on_llm_request()
@@ -604,45 +806,34 @@ class AllCharPlugin(Star):
         """
         store = init_user_memory_store()
         passive_store = init_passive_memory_store()
-        qq_id = store.observe_user(event)
+        qq_id = store._safe_sender_id(event)
         message_text = ""
         try:
             message_text = str(event.get_message_str() or "").strip()
         except Exception:
             message_text = ""
-        passive_store.observe_message(event)
-        await observe_slang_message(self.context, event, self.config)
+        self._schedule_memory_learning_tasks(event, passive_store)
 
-        memory_prompt_max_chars = _to_int_in_range(
-            getattr(self.config, "memory_prompt_max_chars", 1800),
-            default=1800,
-            minimum=400,
-            maximum=12000,
+        (
+            memory_prompt_max_chars,
+            reminiscence_min_message_length,
+            event_recall_enabled,
+            reminiscence_enabled,
+        ) = self._get_memory_injection_config()
+        prompt_jobs = self._build_memory_prompt_jobs(
+            store=store,
+            passive_store=passive_store,
+            event=event,
+            message_text=message_text,
+            qq_id=qq_id,
+            event_recall_enabled=event_recall_enabled,
         )
-        reminiscence_min_message_length = _to_int_in_range(
-            getattr(self.config, "memory_reminiscence_min_message_length", 8),
-            default=8,
-            minimum=1,
-            maximum=200,
-        )
-
-        memory_prompt = store.build_prompt_for_event(event)
-        passive_profile_prompt = passive_store.build_profile_prompt(event)
-        slang_prompt = build_slang_prompt_for_event(event, message_text, self.config)
-        event_recall_enabled = bool(getattr(self.config, "memory_event_recall_enabled", True))
-        event_recall_prompt = (
-            passive_store.build_event_recall_prompt(
-                event,
-                message_text=message_text,
-            )
-            if event_recall_enabled
-            else ""
-        )
-        related_prompt = store.build_related_memories_prompt(
-            message_text,
-            exclude_qq_ids={qq_id} if qq_id else None,
-        )
-        reminiscence_enabled = bool(getattr(self.config, "memory_reminiscence_enabled", True))
+        prompt_parts = await _gather_named_prompt_parts(prompt_jobs)
+        memory_prompt = prompt_parts.get("memory_prompt", "")
+        passive_profile_prompt = prompt_parts.get("passive_profile_prompt", "")
+        slang_prompt = prompt_parts.get("slang_prompt", "")
+        event_recall_prompt = prompt_parts.get("event_recall_prompt", "") if event_recall_enabled else ""
+        related_prompt = prompt_parts.get("related_prompt", "")
         should_trigger_reminiscence = reminiscence_enabled and _should_trigger_reminiscence(
             message_text,
             related_prompt=related_prompt,
@@ -678,8 +869,7 @@ class AllCharPlugin(Star):
             return
 
         base_prompt = getattr(req, "system_prompt", "") or ""
-        joiner = "\n\n" if base_prompt else ""
-        req.system_prompt = f"{base_prompt}{joiner}{extra_prompt}"
+        req.system_prompt = self._join_system_prompt(base_prompt, extra_prompt)
         logger.info(
             (
                 "[astrbot_all_char] on_llm_request 记忆注入完成: sender_id=%s, included=%s, "
@@ -705,9 +895,13 @@ class AllCharPlugin(Star):
         """
         logger.info("[astrbot_all_char][LLMTool] stock_query called: query=%s", query)
         # 复用 /股票 查询 的指令解析逻辑
-        fake = f"/股票 查询 {query}"
-        wrapped = _CmdWrappedEvent(event, fake)
-        async for result in handle_stock_command(wrapped, self.context, self.config):
+        async for result in self._forward_fake_command_results(
+            event,
+            f"/股票 查询 {query}",
+            handle_stock_command,
+            self.context,
+            self.config,
+        ):
             yield result
 
     @filter.llm_tool(name="weather_query")
@@ -745,9 +939,12 @@ class AllCharPlugin(Star):
             parts.append(str(when).strip())
         elif day_int is not None:
             parts.append(str(day_int))
-        fake = " ".join(parts)
-        wrapped = _CmdWrappedEvent(event, fake)
-        async for result in handle_weather_command(wrapped, self.config):
+        async for result in self._forward_fake_command_results(
+            event,
+            " ".join(parts),
+            handle_weather_command,
+            self.config,
+        ):
             yield result
 
     @filter.llm_tool(name="train_query")
@@ -829,9 +1026,13 @@ class AllCharPlugin(Star):
             )
             return
 
-        fake = f"/提醒 {time_str} {content}"
-        wrapped = _CmdWrappedEvent(event, fake)
-        async for result in handle_simple_reminder(wrapped, self.context, self.config):
+        async for result in self._forward_fake_command_results(
+            event,
+            f"/提醒 {time_str} {content}",
+            handle_simple_reminder,
+            self.context,
+            self.config,
+        ):
             yield result
 
     @filter.llm_tool(name="bookkeeping_add_expense")
@@ -870,8 +1071,13 @@ class AllCharPlugin(Star):
         fake = f"记账支出 {amt}"
         if desc:
             fake += f" {desc}"
-        wrapped = _CmdWrappedEvent(event, fake)
-        async for result in handle_bookkeeping_expense(wrapped, self.context, self.config):
+        async for result in self._forward_fake_command_results(
+            event,
+            fake,
+            handle_bookkeeping_expense,
+            self.context,
+            self.config,
+        ):
             yield result
 
     @filter.llm_tool(name="bookkeeping_add_income")
@@ -910,8 +1116,13 @@ class AllCharPlugin(Star):
         fake = f"记账收入 {amt}"
         if desc:
             fake += f" {desc}"
-        wrapped = _CmdWrappedEvent(event, fake)
-        async for result in handle_bookkeeping_income(wrapped, self.context, self.config):
+        async for result in self._forward_fake_command_results(
+            event,
+            fake,
+            handle_bookkeeping_income,
+            self.context,
+            self.config,
+        ):
             yield result
 
     @filter.llm_tool(name="bookkeeping_summary")
@@ -923,9 +1134,13 @@ class AllCharPlugin(Star):
         - 获取结果后，可以在自然语言中进一步解释支出结构，但请基于工具返回内容，不要凭空编造。
         """
         logger.info("[astrbot_all_char][LLMTool] 记账统计工具被调用")
-        fake = "查账统计"
-        wrapped = _CmdWrappedEvent(event, fake)
-        async for result in handle_bookkeeping_summary(wrapped, self.context, self.config):
+        async for result in self._forward_fake_command_results(
+            event,
+            "查账统计",
+            handle_bookkeeping_summary,
+            self.context,
+            self.config,
+        ):
             yield result
 
     @filter.llm_tool(name="smart_search")
@@ -946,9 +1161,13 @@ class AllCharPlugin(Star):
             yield event.plain_result("请输入要搜索的问题。")
             return
 
-        fake = f"/智能搜索 {q}"
-        wrapped = _CmdWrappedEvent(event, fake)
-        async for result in handle_smart_search_command(wrapped, self.context, self.config):
+        async for result in self._forward_fake_command_results(
+            event,
+            f"/智能搜索 {q}",
+            handle_smart_search_command,
+            self.context,
+            self.config,
+        ):
             yield result
 
     @filter.llm_tool(name="web_search")
@@ -969,9 +1188,13 @@ class AllCharPlugin(Star):
             yield event.plain_result("请输入要搜索的关键词。")
             return
 
-        fake = f"/搜索 {q}"
-        wrapped = _CmdWrappedEvent(event, fake)
-        async for result in handle_web_search_command(wrapped, self.context, self.config):
+        async for result in self._forward_fake_command_results(
+            event,
+            f"/搜索 {q}",
+            handle_web_search_command,
+            self.context,
+            self.config,
+        ):
             yield result
 
     # ---------------- 点歌命令与数字选择 ----------------
@@ -1008,9 +1231,7 @@ class AllCharPlugin(Star):
         Args:
             keyword(string): 歌曲名称或相关关键词，例如「青花」或「夜曲 周杰伦」。
         """
-        ctx_wrapper = ContextWrapper[AstrAgentContext](self.context)  # type: ignore[type-arg]
-        tool = MusicPlayTool()
-        result = await tool.call(ctx_wrapper, event=event, keyword=keyword)
+        result = await self._run_tool_call(MusicPlayTool(), event=event, keyword=keyword)
         yield event.plain_result(str(result))
 
     @filter.llm_tool(name="send_email")
@@ -1033,9 +1254,12 @@ class AllCharPlugin(Star):
             subject(string): 邮件主题。
             body(string): 邮件正文内容。
         """
-        ctx_wrapper = ContextWrapper[AstrAgentContext](self.context)  # type: ignore[type-arg]
-        tool = SendEmailTool()
-        result = await tool.call(ctx_wrapper, to_addr=to_addr, subject=subject, body=body)
+        result = await self._run_tool_call(
+            SendEmailTool(),
+            to_addr=to_addr,
+            subject=subject,
+            body=body,
+        )
         yield event.plain_result(str(result))
 
     @filter.llm_tool(name="slang_explain")

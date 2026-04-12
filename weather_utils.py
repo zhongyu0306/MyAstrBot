@@ -12,6 +12,7 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent
 
 from .passive_memory_utils import record_passive_habit
+from .shared_http_utils import get_shared_http_session
 
 
 LEGACY_WEATHER_API_URL = "https://api.nycnm.cn/API/weather.php"
@@ -676,38 +677,38 @@ async def _query_open_meteo_weather_text(
         return None
 
     forecast_days = _normalize_days(days)
-    async with aiohttp.ClientSession() as session:
-        location = await _pick_best_geocoding_result(session, geocoding_api_url, search_name, country_code)
-        if not location:
-            return None
+    session = await get_shared_http_session("weather")
+    location = await _pick_best_geocoding_result(session, geocoding_api_url, search_name, country_code)
+    if not location:
+        return None
 
-        latitude = location.get("latitude")
-        longitude = location.get("longitude")
-        if latitude is None or longitude is None:
-            logger.warning("天气地理编码返回缺少坐标: %s", location)
-            return None
+    latitude = location.get("latitude")
+    longitude = location.get("longitude")
+    if latitude is None or longitude is None:
+        logger.warning("天气地理编码返回缺少坐标: %s", location)
+        return None
 
-        forecast_params = {
-            "latitude": latitude,
-            "longitude": longitude,
-            "timezone": "auto",
-            "forecast_days": forecast_days,
-            "current": (
-                "temperature_2m,relative_humidity_2m,apparent_temperature,"
-                "precipitation,weather_code,wind_speed_10m,wind_direction_10m"
-            ),
-            "daily": (
-                "weather_code,temperature_2m_max,temperature_2m_min,"
-                "apparent_temperature_max,apparent_temperature_min,"
-                "precipitation_probability_max,precipitation_sum,"
-                "wind_speed_10m_max,wind_direction_10m_dominant,"
-                "sunrise,sunset"
-            ),
-        }
+    forecast_params = {
+        "latitude": latitude,
+        "longitude": longitude,
+        "timezone": "auto",
+        "forecast_days": forecast_days,
+        "current": (
+            "temperature_2m,relative_humidity_2m,apparent_temperature,"
+            "precipitation,weather_code,wind_speed_10m,wind_direction_10m"
+        ),
+        "daily": (
+            "weather_code,temperature_2m_max,temperature_2m_min,"
+            "apparent_temperature_max,apparent_temperature_min,"
+            "precipitation_probability_max,precipitation_sum,"
+            "wind_speed_10m_max,wind_direction_10m_dominant,"
+            "sunrise,sunset"
+        ),
+    }
 
-        forecast = await _fetch_json(session, forecast_api_url, forecast_params, "天气预报")
-        if not forecast:
-            return None
+    forecast = await _fetch_json(session, forecast_api_url, forecast_params, "天气预报")
+    if not forecast:
+        return None
 
     return _format_open_meteo_text(
         city,
@@ -723,27 +724,27 @@ async def _query_legacy_weather_text(api_url: str, city: str, days: int | None) 
     try:
         url = _build_url(api_url, city, days, fmt="text")
         logger.info("请求旧版天气 URL: %s", url)
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as response:
-                raw = await response.text()
-                if response.status != 200:
-                    logger.warning("旧版天气 API 返回非 200: status=%s body_len=%d", response.status, len(raw or ""))
-                    return None
-                if not (raw or "").strip():
-                    logger.warning("旧版天气 API 返回空内容")
-                    return None
-                raw = raw.strip()
-                if raw.startswith("{"):
-                    try:
-                        obj = json.loads(raw)
-                        for key in ("data", "result", "text", "content", "msg", "message"):
-                            if key in obj and obj[key] and isinstance(obj[key], str):
-                                return obj[key].strip() or None
-                        if "data" in obj and isinstance(obj["data"], dict):
-                            return raw
-                    except Exception:
-                        pass
-                return raw
+        session = await get_shared_http_session("weather")
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as response:
+            raw = await response.text()
+            if response.status != 200:
+                logger.warning("旧版天气 API 返回非 200: status=%s body_len=%d", response.status, len(raw or ""))
+                return None
+            if not (raw or "").strip():
+                logger.warning("旧版天气 API 返回空内容")
+                return None
+            raw = raw.strip()
+            if raw.startswith("{"):
+                try:
+                    obj = json.loads(raw)
+                    for key in ("data", "result", "text", "content", "msg", "message"):
+                        if key in obj and obj[key] and isinstance(obj[key], str):
+                            return obj[key].strip() or None
+                    if "data" in obj and isinstance(obj["data"], dict):
+                        return raw
+                except Exception:
+                    pass
+            return raw
     except asyncio.TimeoutError:
         logger.error("旧版天气 API 请求超时")
         return None
@@ -776,27 +777,27 @@ async def _query_legacy_weather_image(api_url: str, city: str, days: int | None)
     try:
         url = _build_url(api_url, city, days, fmt="image")
         logger.info("请求旧版天气图片 URL: %s", url)
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as response:
-                data = await response.read()
-                if response.status != 200:
-                    logger.warning("旧版天气图片 API 返回非 200: status=%s body_len=%d", response.status, len(data))
-                    return None
-                if not data:
-                    logger.warning("旧版天气图片 API 返回空内容")
-                    return None
-                content_type = response.headers.get("Content-Type", "")
-                suffix = (
-                    ".png"
-                    if "png" in content_type.lower()
-                    else ".jpg"
-                    if ("jpeg" in content_type.lower() or "jpg" in content_type.lower())
-                    else ".img"
-                )
-                temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-                temp_file.write(data)
-                temp_file.close()
-                return temp_file.name
+        session = await get_shared_http_session("weather")
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as response:
+            data = await response.read()
+            if response.status != 200:
+                logger.warning("旧版天气图片 API 返回非 200: status=%s body_len=%d", response.status, len(data))
+                return None
+            if not data:
+                logger.warning("旧版天气图片 API 返回空内容")
+                return None
+            content_type = response.headers.get("Content-Type", "")
+            suffix = (
+                ".png"
+                if "png" in content_type.lower()
+                else ".jpg"
+                if ("jpeg" in content_type.lower() or "jpg" in content_type.lower())
+                else ".img"
+            )
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+            temp_file.write(data)
+            temp_file.close()
+            return temp_file.name
     except asyncio.TimeoutError:
         logger.error("旧版天气图片 API 请求超时")
         return None

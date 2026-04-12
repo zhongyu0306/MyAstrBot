@@ -4,7 +4,7 @@ import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
@@ -800,35 +800,12 @@ class StockModule:
             rec["price_alerts"] = []
         return rec
 
-    async def handle_command(self, event: AstrMessageEvent):
-        msg = event.get_message_str().strip()
-        parts = msg.split()
-        if len(parts) < 2:
-            async for r in self._send_help_v2(event):
-                yield r
-            return
-        cmd, args = parts[1].strip().lower(), parts[2:] if len(parts) > 2 else []
-        if cmd == "量化分析":
-            async for r in self._handle_stock_quant_analysis(event, args):
-                yield r
-            return
-        if cmd == "智能分析":
-            async for r in self._handle_stock_ai_analysis(event, args):
-                yield r
-            return
-        if cmd == "股票智能分析":
-            async for r in self._handle_stock_multi_agent_analysis(event, args):
-                yield r
-            return
-        if can_handle_stock_extension(cmd):
-            async for r in handle_stock_extension_command(event, self.context, cmd, args):
-                yield r
-            return
-        session_id = getattr(event, "unified_msg_origin", None) or getattr(event, "session_id", "")
-        if not session_id:
-            yield event.plain_result("❌ 无法获取当前会话。")
-            return
+    @staticmethod
+    def _get_session_id(event: AstrMessageEvent) -> str:
+        return getattr(event, "unified_msg_origin", None) or getattr(event, "session_id", "")
 
+    @staticmethod
+    def _get_creator_info(event: AstrMessageEvent) -> tuple[str | None, str | None]:
         creator_id: str | None = None
         creator_name: str | None = None
         try:
@@ -839,276 +816,449 @@ class StockModule:
         except Exception:
             creator_id = creator_id or None
             creator_name = creator_name or None
+        return creator_id, creator_name
 
-        if cmd in ("添加", "add"):
-            if not args:
-                yield event.plain_result("用法：/股票 添加 代码，如 /股票 添加 600519")
-                return
-            code = _normalize_code(args[0])
-            if not code:
-                yield event.plain_result("❌ 无效股票代码。")
-                return
-            rec = self._session_data(session_id)
-            if code in rec["stocks"]:
-                yield event.plain_result(f"✅ {code} 已在自选中。")
-                return
-            rec["stocks"].append(code)
-            data = _load_watchlist()
-            data[session_id] = rec
-            _save_watchlist(data)
-            record_passive_habit(event, "stock", "stock_code", code, source_text=msg)
-            yield event.plain_result(f"✅ 已添加自选：{code}")
+    @staticmethod
+    def _stock_command_routes() -> dict[str, str]:
+        return {
+            "添加": "_handle_add_watchlist_command",
+            "add": "_handle_add_watchlist_command",
+            "删除": "_handle_remove_watchlist_command",
+            "移除": "_handle_remove_watchlist_command",
+            "remove": "_handle_remove_watchlist_command",
+            "del": "_handle_remove_watchlist_command",
+            "列表": "_handle_list_watchlist_command",
+            "list": "_handle_list_watchlist_command",
+            "ls": "_handle_list_watchlist_command",
+            "查询": "_handle_query_quotes_command",
+            "查": "_handle_query_quotes_command",
+            "query": "_handle_query_quotes_command",
+            "q": "_handle_query_quotes_command",
+            "提醒": "_handle_set_stock_reminder_command",
+            "定时": "_handle_set_stock_reminder_command",
+            "remind": "_handle_set_stock_reminder_command",
+            "提醒列表": "_handle_list_stock_reminders_command",
+            "remindlist": "_handle_list_stock_reminders_command",
+            "取消提醒": "_handle_cancel_stock_reminder_command",
+            "cancelremind": "_handle_cancel_stock_reminder_command",
+            "跌到": "_handle_below_price_alert_command",
+            "提醒跌": "_handle_below_price_alert_command",
+            "跌价提醒": "_handle_below_price_alert_command",
+            "涨到": "_handle_above_price_alert_command",
+            "提醒涨": "_handle_above_price_alert_command",
+            "涨价提醒": "_handle_above_price_alert_command",
+            "价格提醒列表": "_handle_list_price_alerts_command",
+            "跌价列表": "_handle_list_price_alerts_command",
+            "涨价列表": "_handle_list_price_alerts_command",
+            "取消价格提醒": "_handle_cancel_price_alert_command",
+            "取消跌价": "_handle_cancel_price_alert_command",
+            "取消涨价": "_handle_cancel_price_alert_command",
+            "帮助": "_handle_help_command",
+            "help": "_handle_help_command",
+            "?": "_handle_help_command",
+        }
 
-        elif cmd in ("删除", "移除", "remove", "del"):
-            if not args:
-                yield event.plain_result("用法：/股票 删除 代码")
-                return
-            code = _normalize_code(args[0])
-            rec = self._session_data(session_id)
-            if code in rec["stocks"]:
-                rec["stocks"].remove(code)
-                data = _load_watchlist()
-                data[session_id] = rec
-                _save_watchlist(data)
-                yield event.plain_result(f"✅ 已移除：{code}")
-            else:
-                yield event.plain_result(f"❌ 自选无 {code}")
+    @staticmethod
+    def _save_session_record(session_id: str, rec: dict[str, Any]) -> None:
+        data = _load_watchlist()
+        data[session_id] = rec
+        _save_watchlist(data)
 
-        elif cmd in ("列表", "list", "ls"):
-            rec = self._session_data(session_id)
-            if not rec["stocks"]:
-                yield event.plain_result("当前暂无自选，使用 /股票 添加 代码 添加。")
-                return
-            quotes = await _fetch_quotes(rec["stocks"])
-            yield event.plain_result(_format_quotes(quotes, "自选股列表"))
-
-        elif cmd in ("查询", "查", "query", "q"):
-            codes: list[str] = []
-            name_keywords: list[str] = []
-            if args:
-                for a in args:
-                    code = _normalize_code(a)
-                    if code:
-                        codes.append(code)
-                    else:
-                        name_keywords.append(a.strip())
-                if name_keywords:
-                    if len(name_keywords) > 1:
-                        yield event.plain_result("一次仅支持按一个名称关键字查询，请改用：/股票 查询 股票名 或 代码。")
-                        return
-                    kw = name_keywords[0]
-                    matches = await _search_code_by_name(kw, max_results=5)
-                    if not matches:
-                        yield event.plain_result(f"未找到名称包含「{kw}」的股票，请改用代码试试。")
-                        return
-                    if len(matches) > 1:
-                        lines = ["找到多只匹配的股票，请改用代码查询："]
-                        for m in matches:
-                            lines.append(f"  • {m['name']}（{m['code']}）")
-                        yield event.plain_result("\n".join(lines))
-                        return
-                    codes.append(matches[0]["code"])
-            else:
-                rec = self._session_data(session_id)
-                codes = (rec.get("stocks") or [])[:20]
-            if not codes:
-                yield event.plain_result("请指定代码或先添加自选，如：/股票 查询 600519 或 /股票 查询 贵州茅台")
-                return
-            quotes = await _fetch_quotes(codes)
-            for code in codes[:5]:
-                record_passive_habit(event, "stock", "stock_code", code, source_text=msg)
-            yield event.plain_result(_format_quotes(quotes, "行情"))
-
-        elif cmd in ("提醒", "定时", "remind"):
-            if not args:
-                yield event.plain_result("用法：/股票 提醒 09:30 或 /股票 提醒 09:30 一次")
-                return
-            time_str = args[0].strip().replace("：", ":")
-            if not re.match(r"^\d{1,2}:\d{2}$", time_str):
-                yield event.plain_result("时间格式请用 09:30")
-                return
-            repeat = "once" if len(args) > 1 and args[1] in ("一次", "once") else "daily"
-            rec = self._session_data(session_id)
-            reminders = rec.get("reminders") or []
-            if any(r.get("time") == time_str for r in reminders):
-                yield event.plain_result(f"✅ 已有 {time_str} 的提醒。")
-                return
-            reminders.append(
-                {
-                    "time": time_str,
-                    "repeat": repeat,
-                    "creator_id": creator_id,
-                    "creator_name": creator_name,
-                }
-            )
-            rec["reminders"] = reminders
-            data = _load_watchlist()
-            data[session_id] = rec
-            _save_watchlist(data)
-            logger.info(
-                "股票定时提醒已设置：session_id=%s time=%s repeat=%s creator_id=%s creator_name=%s",
-                session_id,
-                time_str,
-                repeat,
-                creator_id,
-                creator_name,
-            )
-            record_passive_habit(event, "stock", "reminder_time", time_str, source_text=msg)
-            yield event.plain_result(f"✅ 已设置 {time_str} 定时提醒（{'每天' if repeat == 'daily' else '仅一次'}）")
-
-        elif cmd in ("提醒列表", "remindlist"):
-            rec = self._session_data(session_id)
-            reminders = rec.get("reminders") or []
-            if not reminders:
-                yield event.plain_result("当前未设置定时提醒。")
-                return
-            lines = ["⏰ 定时提醒："]
-            for r in reminders:
-                lines.append(f"  • {r.get('time', '')}（{'每天' if r.get('repeat') == 'daily' else '一次'}）")
-            yield event.plain_result("\n".join(lines))
-
-        elif cmd in ("取消提醒", "cancelremind"):
-            if not args:
-                yield event.plain_result("用法：/股票 取消提醒 09:30")
-                return
-            time_str = args[0].strip()
-            rec = self._session_data(session_id)
-            reminders = rec.get("reminders") or []
-            new_reminders = [r for r in reminders if r.get("time") != time_str]
-            if len(new_reminders) == len(reminders):
-                yield event.plain_result(f"未找到 {time_str} 的提醒。")
-                return
-            rec["reminders"] = new_reminders
-            data = _load_watchlist()
-            data[session_id] = rec
-            _save_watchlist(data)
-            yield event.plain_result(f"✅ 已取消 {time_str} 的提醒。")
-
-        elif cmd in ("跌到", "提醒跌", "跌价提醒"):
-            if len(args) < 2:
-                yield event.plain_result("用法：/股票 跌到 代码 价格 — 如 /股票 跌到 600519 1800")
-                return
-            code = _normalize_code(args[0])
-            if not code:
-                yield event.plain_result("❌ 无效股票代码。")
-                return
-            try:
-                price = float(args[1].replace(",", ""))
-            except ValueError:
-                yield event.plain_result("❌ 价格请填数字，如 1800 或 18.5")
-                return
-            if price <= 0:
-                yield event.plain_result("❌ 价格须大于 0。")
-                return
-            rec = self._session_data(session_id)
-            alerts = rec.get("price_alerts") or []
-            if any(a.get("code") == code and a.get("condition") == "below" for a in alerts):
-                yield event.plain_result(f"✅ 已有 {code} 的跌价提醒，请先取消再设。")
-                return
-            alerts.append(
-                {
-                    "code": code,
-                    "target_price": price,
-                    "condition": "below",
-                    "creator_id": creator_id,
-                    "creator_name": creator_name,
-                }
-            )
-            rec["price_alerts"] = alerts
-            data = _load_watchlist()
-            data[session_id] = rec
-            _save_watchlist(data)
-            logger.info(
-                "股票价格提醒已设置（跌到）：session_id=%s code=%s target=%.4f creator_id=%s creator_name=%s",
-                session_id,
-                code,
-                price,
-                creator_id,
-                creator_name,
-            )
-            record_passive_habit(event, "stock", "stock_code", code, source_text=msg)
-            yield event.plain_result(f"✅ 已设置：{code} 跌到 {price} 元时提醒。")
-
-        elif cmd in ("涨到", "提醒涨", "涨价提醒"):
-            if len(args) < 2:
-                yield event.plain_result("用法：/股票 涨到 代码 价格 — 如 /股票 涨到 600519 2000")
-                return
-            code = _normalize_code(args[0])
-            if not code:
-                yield event.plain_result("❌ 无效股票代码。")
-                return
-            try:
-                price = float(args[1].replace(",", ""))
-            except ValueError:
-                yield event.plain_result("❌ 价格请填数字。")
-                return
-            if price <= 0:
-                yield event.plain_result("❌ 价格须大于 0。")
-                return
-            rec = self._session_data(session_id)
-            alerts = rec.get("price_alerts") or []
-            if any(a.get("code") == code and a.get("condition") == "above" for a in alerts):
-                yield event.plain_result(f"✅ 已有 {code} 的涨价提醒，请先取消再设。")
-                return
-            alerts.append(
-                {
-                    "code": code,
-                    "target_price": price,
-                    "condition": "above",
-                    "creator_id": creator_id,
-                    "creator_name": creator_name,
-                }
-            )
-            rec["price_alerts"] = alerts
-            data = _load_watchlist()
-            data[session_id] = rec
-            _save_watchlist(data)
-            logger.info(
-                "股票价格提醒已设置（涨到）：session_id=%s code=%s target=%.4f creator_id=%s creator_name=%s",
-                session_id,
-                code,
-                price,
-                creator_id,
-                creator_name,
-            )
-            record_passive_habit(event, "stock", "stock_code", code, source_text=msg)
-            yield event.plain_result(f"✅ 已设置：{code} 涨到 {price} 元时提醒。")
-
-        elif cmd in ("价格提醒列表", "跌价列表", "涨价列表"):
-            rec = self._session_data(session_id)
-            alerts = rec.get("price_alerts") or []
-            if not alerts:
-                yield event.plain_result("当前未设置价格提醒。")
-                return
-            lines = ["🔔 价格提醒列表："]
-            for a in alerts:
-                cond = "跌到" if a.get("condition") == "below" else "涨到"
-                lines.append(f"  • {a.get('code', '')} {cond} {a.get('target_price', '')} 元")
-            yield event.plain_result("\n".join(lines))
-
-        elif cmd in ("取消价格提醒", "取消跌价", "取消涨价"):
-            if not args:
-                yield event.plain_result("用法：/股票 取消价格提醒 代码")
-                return
-            code = _normalize_code(args[0])
-            rec = self._session_data(session_id)
-            alerts = rec.get("price_alerts") or []
-            new_alerts = [a for a in alerts if a.get("code") != code]
-            if len(new_alerts) == len(alerts):
-                yield event.plain_result(f"未找到 {code} 的价格提醒。")
-                return
-            rec["price_alerts"] = new_alerts
-            data = _load_watchlist()
-            data[session_id] = rec
-            _save_watchlist(data)
-            yield event.plain_result(f"✅ 已取消 {code} 的价格提醒。")
-
-        elif cmd in ("帮助", "help", "?"):
-            async for r in self._send_help_v2(event):
-                yield r
+    async def _resolve_quote_codes(self, session_id: str, args: list[str]) -> tuple[list[str], str | None]:
+        codes: list[str] = []
+        name_keywords: list[str] = []
+        if args:
+            for item in args:
+                code = _normalize_code(item)
+                if code:
+                    codes.append(code)
+                else:
+                    name_keywords.append(item.strip())
+            if name_keywords:
+                if len(name_keywords) > 1:
+                    return [], "一次仅支持按一个名称关键词查询，请改用：/股票 查询 股票名 或 代码。"
+                keyword = name_keywords[0]
+                matches = await _search_code_by_name(keyword, max_results=5)
+                if not matches:
+                    return [], f"未找到名称包含“{keyword}”的股票，请改用代码试试。"
+                if len(matches) > 1:
+                    lines = ["找到多只匹配的股票，请改用代码查询："]
+                    for match in matches:
+                        lines.append(f"  - {match['name']}（{match['code']}）")
+                    return [], "\n".join(lines)
+                codes.append(matches[0]["code"])
         else:
-            async for r in self._send_help_v2(event):
-                yield r
+            rec = self._session_data(session_id)
+            codes = (rec.get("stocks") or [])[:20]
+        if not codes:
+            return [], "请指定代码或先添加自选，例如：/股票 查询 600519 或 /股票 查询 贵州茅台"
+        return codes, None
+
+    async def _handle_add_watchlist_command(
+        self,
+        event: AstrMessageEvent,
+        session_id: str,
+        args: list[str],
+        msg: str,
+        creator_id: str | None,
+        creator_name: str | None,
+    ) -> AsyncIterator[Any]:
+        del creator_id, creator_name
+        if not args:
+            yield event.plain_result("用法：/股票 添加 代码，例如 /股票 添加 600519")
+            return
+        code = _normalize_code(args[0])
+        if not code:
+            yield event.plain_result("无效股票代码。")
+            return
+        rec = self._session_data(session_id)
+        if code in rec["stocks"]:
+            yield event.plain_result(f"{code} 已在自选中。")
+            return
+        rec["stocks"].append(code)
+        self._save_session_record(session_id, rec)
+        record_passive_habit(event, "stock", "stock_code", code, source_text=msg)
+        yield event.plain_result(f"已添加自选：{code}")
+
+    async def _handle_remove_watchlist_command(
+        self,
+        event: AstrMessageEvent,
+        session_id: str,
+        args: list[str],
+        msg: str,
+        creator_id: str | None,
+        creator_name: str | None,
+    ) -> AsyncIterator[Any]:
+        del msg, creator_id, creator_name
+        if not args:
+            yield event.plain_result("用法：/股票 删除 代码")
+            return
+        code = _normalize_code(args[0])
+        rec = self._session_data(session_id)
+        if code in rec["stocks"]:
+            rec["stocks"].remove(code)
+            self._save_session_record(session_id, rec)
+            yield event.plain_result(f"已移除：{code}")
+            return
+        yield event.plain_result(f"自选无 {code}")
+
+    async def _handle_list_watchlist_command(
+        self,
+        event: AstrMessageEvent,
+        session_id: str,
+        args: list[str],
+        msg: str,
+        creator_id: str | None,
+        creator_name: str | None,
+    ) -> AsyncIterator[Any]:
+        del args, msg, creator_id, creator_name
+        rec = self._session_data(session_id)
+        if not rec["stocks"]:
+            yield event.plain_result("当前暂无自选，使用 /股票 添加 代码 添加。")
+            return
+        quotes = await _fetch_quotes(rec["stocks"])
+        yield event.plain_result(_format_quotes(quotes, "自选股列表"))
+
+    async def _handle_query_quotes_command(
+        self,
+        event: AstrMessageEvent,
+        session_id: str,
+        args: list[str],
+        msg: str,
+        creator_id: str | None,
+        creator_name: str | None,
+    ) -> AsyncIterator[Any]:
+        del creator_id, creator_name
+        codes, error = await self._resolve_quote_codes(session_id, args)
+        if error:
+            yield event.plain_result(error)
+            return
+        quotes = await _fetch_quotes(codes)
+        for code in codes[:5]:
+            record_passive_habit(event, "stock", "stock_code", code, source_text=msg)
+        yield event.plain_result(_format_quotes(quotes, "行情"))
+
+    async def _handle_set_stock_reminder_command(
+        self,
+        event: AstrMessageEvent,
+        session_id: str,
+        args: list[str],
+        msg: str,
+        creator_id: str | None,
+        creator_name: str | None,
+    ) -> AsyncIterator[Any]:
+        if not args:
+            yield event.plain_result("用法：/股票 提醒 09:30 或 /股票 提醒 09:30 一次")
+            return
+        time_str = args[0].strip().replace("：", ":")
+        if not re.match(r"^\d{1,2}:\d{2}$", time_str):
+            yield event.plain_result("时间格式请用 09:30")
+            return
+        repeat = "once" if len(args) > 1 and args[1] in ("一次", "once") else "daily"
+        rec = self._session_data(session_id)
+        reminders = rec.get("reminders") or []
+        if any(item.get("time") == time_str for item in reminders):
+            yield event.plain_result(f"已有 {time_str} 的提醒。")
+            return
+        reminders.append(
+            {
+                "time": time_str,
+                "repeat": repeat,
+                "creator_id": creator_id,
+                "creator_name": creator_name,
+            }
+        )
+        rec["reminders"] = reminders
+        self._save_session_record(session_id, rec)
+        logger.info(
+            "股票定时提醒已设置：session_id=%s time=%s repeat=%s creator_id=%s creator_name=%s",
+            session_id,
+            time_str,
+            repeat,
+            creator_id,
+            creator_name,
+        )
+        record_passive_habit(event, "stock", "reminder_time", time_str, source_text=msg)
+        repeat_text = "每天" if repeat == "daily" else "仅一次"
+        yield event.plain_result(f"已设置 {time_str} 定时提醒（{repeat_text}）")
+
+    async def _handle_list_stock_reminders_command(
+        self,
+        event: AstrMessageEvent,
+        session_id: str,
+        args: list[str],
+        msg: str,
+        creator_id: str | None,
+        creator_name: str | None,
+    ) -> AsyncIterator[Any]:
+        del args, msg, creator_id, creator_name
+        rec = self._session_data(session_id)
+        reminders = rec.get("reminders") or []
+        if not reminders:
+            yield event.plain_result("当前未设置定时提醒。")
+            return
+        lines = ["⏰ 定时提醒："]
+        for reminder in reminders:
+            repeat_text = "每天" if reminder.get("repeat") == "daily" else "一次"
+            lines.append(f"  - {reminder.get('time', '')}（{repeat_text}）")
+        yield event.plain_result("\n".join(lines))
+
+    async def _handle_cancel_stock_reminder_command(
+        self,
+        event: AstrMessageEvent,
+        session_id: str,
+        args: list[str],
+        msg: str,
+        creator_id: str | None,
+        creator_name: str | None,
+    ) -> AsyncIterator[Any]:
+        del msg, creator_id, creator_name
+        if not args:
+            yield event.plain_result("用法：/股票 取消提醒 09:30")
+            return
+        time_str = args[0].strip()
+        rec = self._session_data(session_id)
+        reminders = rec.get("reminders") or []
+        new_reminders = [item for item in reminders if item.get("time") != time_str]
+        if len(new_reminders) == len(reminders):
+            yield event.plain_result(f"未找到 {time_str} 的提醒。")
+            return
+        rec["reminders"] = new_reminders
+        self._save_session_record(session_id, rec)
+        yield event.plain_result(f"已取消 {time_str} 的提醒。")
+
+    async def _handle_add_price_alert_command(
+        self,
+        event: AstrMessageEvent,
+        session_id: str,
+        args: list[str],
+        msg: str,
+        creator_id: str | None,
+        creator_name: str | None,
+        *,
+        condition: str,
+        action_text: str,
+    ) -> AsyncIterator[Any]:
+        if len(args) < 2:
+            yield event.plain_result(f"用法：/股票 {action_text} 代码 价格，例如 /股票 {action_text} 600519 1800")
+            return
+        code = _normalize_code(args[0])
+        if not code:
+            yield event.plain_result("无效股票代码。")
+            return
+        try:
+            price = float(args[1].replace(",", ""))
+        except ValueError:
+            yield event.plain_result("价格请填数字，例如 1800 或 18.5")
+            return
+        if price <= 0:
+            yield event.plain_result("价格需大于 0。")
+            return
+        rec = self._session_data(session_id)
+        alerts = rec.get("price_alerts") or []
+        if any(item.get("code") == code and item.get("condition") == condition for item in alerts):
+            duplicate_text = "跌价提醒" if condition == "below" else "涨价提醒"
+            yield event.plain_result(f"已有 {code} 的{duplicate_text}，请先取消再设。")
+            return
+        alerts.append(
+            {
+                "code": code,
+                "target_price": price,
+                "condition": condition,
+                "creator_id": creator_id,
+                "creator_name": creator_name,
+            }
+        )
+        rec["price_alerts"] = alerts
+        self._save_session_record(session_id, rec)
+        logger.info(
+            "股票价格提醒已设置：session_id=%s code=%s condition=%s target=%.4f creator_id=%s creator_name=%s",
+            session_id,
+            code,
+            condition,
+            price,
+            creator_id,
+            creator_name,
+        )
+        record_passive_habit(event, "stock", "stock_code", code, source_text=msg)
+        yield event.plain_result(f"已设置：{code} {action_text} {price} 元时提醒。")
+
+    async def _handle_below_price_alert_command(
+        self,
+        event: AstrMessageEvent,
+        session_id: str,
+        args: list[str],
+        msg: str,
+        creator_id: str | None,
+        creator_name: str | None,
+    ) -> AsyncIterator[Any]:
+        async for result in self._handle_add_price_alert_command(
+            event,
+            session_id,
+            args,
+            msg,
+            creator_id,
+            creator_name,
+            condition="below",
+            action_text="跌到",
+        ):
+            yield result
+
+    async def _handle_above_price_alert_command(
+        self,
+        event: AstrMessageEvent,
+        session_id: str,
+        args: list[str],
+        msg: str,
+        creator_id: str | None,
+        creator_name: str | None,
+    ) -> AsyncIterator[Any]:
+        async for result in self._handle_add_price_alert_command(
+            event,
+            session_id,
+            args,
+            msg,
+            creator_id,
+            creator_name,
+            condition="above",
+            action_text="涨到",
+        ):
+            yield result
+
+    async def _handle_list_price_alerts_command(
+        self,
+        event: AstrMessageEvent,
+        session_id: str,
+        args: list[str],
+        msg: str,
+        creator_id: str | None,
+        creator_name: str | None,
+    ) -> AsyncIterator[Any]:
+        del args, msg, creator_id, creator_name
+        rec = self._session_data(session_id)
+        alerts = rec.get("price_alerts") or []
+        if not alerts:
+            yield event.plain_result("当前未设置价格提醒。")
+            return
+        lines = ["🔔 价格提醒列表："]
+        for alert in alerts:
+            cond = "跌到" if alert.get("condition") == "below" else "涨到"
+            lines.append(f"  - {alert.get('code', '')} {cond} {alert.get('target_price', '')} 元")
+        yield event.plain_result("\n".join(lines))
+
+    async def _handle_cancel_price_alert_command(
+        self,
+        event: AstrMessageEvent,
+        session_id: str,
+        args: list[str],
+        msg: str,
+        creator_id: str | None,
+        creator_name: str | None,
+    ) -> AsyncIterator[Any]:
+        del msg, creator_id, creator_name
+        if not args:
+            yield event.plain_result("用法：/股票 取消价格提醒 代码")
+            return
+        code = _normalize_code(args[0])
+        rec = self._session_data(session_id)
+        alerts = rec.get("price_alerts") or []
+        new_alerts = [item for item in alerts if item.get("code") != code]
+        if len(new_alerts) == len(alerts):
+            yield event.plain_result(f"未找到 {code} 的价格提醒。")
+            return
+        rec["price_alerts"] = new_alerts
+        self._save_session_record(session_id, rec)
+        yield event.plain_result(f"已取消 {code} 的价格提醒。")
+
+    async def _handle_help_command(
+        self,
+        event: AstrMessageEvent,
+        session_id: str,
+        args: list[str],
+        msg: str,
+        creator_id: str | None,
+        creator_name: str | None,
+    ) -> AsyncIterator[Any]:
+        del session_id, args, msg, creator_id, creator_name
+        async for result in self._send_help_v2(event):
+            yield result
+
+    async def handle_command(self, event: AstrMessageEvent):
+        msg = event.get_message_str().strip()
+        parts = msg.split()
+        if len(parts) < 2:
+            async for result in self._send_help_v2(event):
+                yield result
+            return
+        cmd = parts[1].strip().lower()
+        args = parts[2:] if len(parts) > 2 else []
+        analysis_handlers = {
+            "量化分析": self._handle_stock_quant_analysis,
+            "智能分析": self._handle_stock_ai_analysis,
+            "股票智能分析": self._handle_stock_multi_agent_analysis,
+        }
+        analysis_handler = analysis_handlers.get(cmd)
+        if analysis_handler is not None:
+            async for result in analysis_handler(event, args):
+                yield result
+            return
+        if can_handle_stock_extension(cmd):
+            async for result in handle_stock_extension_command(event, self.context, cmd, args):
+                yield result
+            return
+        session_id = self._get_session_id(event)
+        if not session_id:
+            yield event.plain_result("无法获取当前会话。")
+            return
+        creator_id, creator_name = self._get_creator_info(event)
+        handler_name = self._stock_command_routes().get(cmd)
+        if handler_name is None:
+            async for result in self._send_help_v2(event):
+                yield result
+            return
+        handler = getattr(self, handler_name)
+        async for result in handler(event, session_id, args, msg, creator_id, creator_name):
+            yield result
 
     async def _handle_stock_quant_analysis(self, event: AstrMessageEvent, args: list[str]):
         stock_code, error = await self._resolve_stock_target(args[0] if args else None)

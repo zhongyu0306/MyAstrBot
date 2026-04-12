@@ -12,6 +12,7 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent
 
 from .config_utils import ensure_flat_config
+from .shared_http_utils import get_shared_http_session
 
 OCR_PROMPT = "请识别并完整、准确地提取图片中的所有文字（OCR）。只输出图片中的文字内容，不要解释、不要加前后缀。若图中无文字则回复「图中未识别到文字」。"
 
@@ -108,15 +109,15 @@ async def _fetch_image_as_base64(url_or_path: str) -> str | None:
         return None
     # 远程 URL
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(s, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                if resp.status != 200:
-                    return None
-                raw = await resp.read()
-                if not raw:
-                    return None
-                b64 = base64.standard_b64encode(raw).decode("ascii")
-                return f"data:image/jpeg;base64,{b64}"
+        session = await get_shared_http_session("ocr")
+        async with session.get(s, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+            if resp.status != 200:
+                return None
+            raw = await resp.read()
+            if not raw:
+                return None
+            b64 = base64.standard_b64encode(raw).decode("ascii")
+            return f"data:image/jpeg;base64,{b64}"
     except Exception as e:
         logger.warning("OCR 下载图片失败: %s", e)
     return None
@@ -181,21 +182,21 @@ async def _call_openai_vision(
         "max_tokens": 4096,
     }
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                post_url, json=body, headers=headers, timeout=aiohttp.ClientTimeout(total=60)
-            ) as resp:
-                if resp.status != 200:
-                    text = await resp.text()
-                    logger.warning("OCR API 非 200: %s %s", resp.status, text[:200])
-                    return None
-                data = await resp.json()
-                choice = (data or {}).get("choices") or []
-                if not choice:
-                    return None
-                msg = choice[0].get("message") or {}
-                content = msg.get("content") or ""
-                return content.strip() or None
+        session = await get_shared_http_session("ocr")
+        async with session.post(
+            post_url, json=body, headers=headers, timeout=aiohttp.ClientTimeout(total=60)
+        ) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                logger.warning("OCR API 非 200: %s %s", resp.status, text[:200])
+                return None
+            data = await resp.json()
+            choice = (data or {}).get("choices") or []
+            if not choice:
+                return None
+            msg = choice[0].get("message") or {}
+            content = msg.get("content") or ""
+            return content.strip() or None
     except Exception as e:
         logger.warning("OCR API 请求异常: %s", e)
     return None

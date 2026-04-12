@@ -13,6 +13,7 @@ from typing import Any
 import aiohttp
 
 from astrbot.api import logger
+from ..shared_http_utils import get_shared_http_session
 
 from .models import StockInfo
 
@@ -166,47 +167,47 @@ class StockAnalyzer:
         }
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=15),
-                ) as response:
-                    if response.status != 200:
-                        return None
+            session = await get_shared_http_session("fund_stock_tencent", total_timeout_seconds=15)
+            async with session.get(
+                url,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as response:
+                if response.status != 200:
+                    return None
 
-                    text = await response.text(encoding="gbk", errors="ignore")
-                    match = re.search(r'"(.+)"', text)
-                    if not match:
-                        return None
+                text = await response.text(encoding="gbk", errors="ignore")
+                match = re.search(r'"(.+)"', text)
+                if not match:
+                    return None
 
-                    parts = match.group(1).split("~")
-                    if len(parts) < 38:
-                        return None
+                parts = match.group(1).split("~")
+                if len(parts) < 38:
+                    return None
 
-                    def sf(value: str) -> float:
-                        return self._safe_float(value)
+                def sf(value: str) -> float:
+                    return self._safe_float(value)
 
-                    self._current_source = "tencent_direct"
-                    return StockInfo(
-                        code=code,
-                        name=parts[1].strip() if len(parts) > 1 else code,
-                        latest_price=sf(parts[3]) if len(parts) > 3 else 0.0,
-                        change_amount=sf(parts[31]) if len(parts) > 31 else 0.0,
-                        change_rate=sf(parts[32]) if len(parts) > 32 else 0.0,
-                        open_price=sf(parts[5]) if len(parts) > 5 else 0.0,
-                        high_price=sf(parts[33]) if len(parts) > 33 else 0.0,
-                        low_price=sf(parts[34]) if len(parts) > 34 else 0.0,
-                        prev_close=sf(parts[4]) if len(parts) > 4 else 0.0,
-                        volume=sf(parts[6]) * 100 if len(parts) > 6 else 0.0,
-                        amount=sf(parts[37]) * 10000 if len(parts) > 37 else 0.0,
-                        amplitude=0.0,
-                        turnover_rate=sf(parts[38]) if len(parts) > 38 else 0.0,
-                        pe_ratio=0.0,
-                        pb_ratio=0.0,
-                        total_market_cap=0.0,
-                        circulating_market_cap=0.0,
-                    )
+                self._current_source = "tencent_direct"
+                return StockInfo(
+                    code=code,
+                    name=parts[1].strip() if len(parts) > 1 else code,
+                    latest_price=sf(parts[3]) if len(parts) > 3 else 0.0,
+                    change_amount=sf(parts[31]) if len(parts) > 31 else 0.0,
+                    change_rate=sf(parts[32]) if len(parts) > 32 else 0.0,
+                    open_price=sf(parts[5]) if len(parts) > 5 else 0.0,
+                    high_price=sf(parts[33]) if len(parts) > 33 else 0.0,
+                    low_price=sf(parts[34]) if len(parts) > 34 else 0.0,
+                    prev_close=sf(parts[4]) if len(parts) > 4 else 0.0,
+                    volume=sf(parts[6]) * 100 if len(parts) > 6 else 0.0,
+                    amount=sf(parts[37]) * 10000 if len(parts) > 37 else 0.0,
+                    amplitude=0.0,
+                    turnover_rate=sf(parts[38]) if len(parts) > 38 else 0.0,
+                    pe_ratio=0.0,
+                    pb_ratio=0.0,
+                    total_market_cap=0.0,
+                    circulating_market_cap=0.0,
+                )
         except Exception as e:
             logger.warning("腾讯单股实时行情获取失败: %s - %s", code, e)
             return None
@@ -229,49 +230,49 @@ class StockAnalyzer:
         }
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=15),
-                ) as response:
-                    if response.status != 200:
-                        return None
+            session = await get_shared_http_session("fund_stock_sina", total_timeout_seconds=15)
+            async with session.get(
+                url,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as response:
+                if response.status != 200:
+                    return None
 
-                    text = await response.text(encoding="gbk", errors="ignore")
-                    match = re.search(r'"(.+)"', text)
-                    if not match:
-                        return None
+                text = await response.text(encoding="gbk", errors="ignore")
+                match = re.search(r'"(.+)"', text)
+                if not match:
+                    return None
 
-                    parts = match.group(1).split(",")
-                    if len(parts) < 10:
-                        return None
+                parts = match.group(1).split(",")
+                if len(parts) < 10:
+                    return None
 
-                    current_price = self._safe_float(parts[3])
-                    prev_close = self._safe_float(parts[2])
-                    change_amount = current_price - prev_close if prev_close else 0.0
-                    change_rate = change_amount / prev_close * 100 if prev_close else 0.0
+                current_price = self._safe_float(parts[3])
+                prev_close = self._safe_float(parts[2])
+                change_amount = current_price - prev_close if prev_close else 0.0
+                change_rate = change_amount / prev_close * 100 if prev_close else 0.0
 
-                    self._current_source = "sina_direct"
-                    return StockInfo(
-                        code=code,
-                        name=parts[0].strip() if parts[0].strip() else code,
-                        latest_price=current_price,
-                        change_amount=change_amount,
-                        change_rate=change_rate,
-                        open_price=self._safe_float(parts[1]),
-                        high_price=self._safe_float(parts[4]),
-                        low_price=self._safe_float(parts[5]),
-                        prev_close=prev_close,
-                        volume=self._safe_float(parts[8]),
-                        amount=self._safe_float(parts[9]),
-                        amplitude=0.0,
-                        turnover_rate=0.0,
-                        pe_ratio=0.0,
-                        pb_ratio=0.0,
-                        total_market_cap=0.0,
-                        circulating_market_cap=0.0,
-                    )
+                self._current_source = "sina_direct"
+                return StockInfo(
+                    code=code,
+                    name=parts[0].strip() if parts[0].strip() else code,
+                    latest_price=current_price,
+                    change_amount=change_amount,
+                    change_rate=change_rate,
+                    open_price=self._safe_float(parts[1]),
+                    high_price=self._safe_float(parts[4]),
+                    low_price=self._safe_float(parts[5]),
+                    prev_close=prev_close,
+                    volume=self._safe_float(parts[8]),
+                    amount=self._safe_float(parts[9]),
+                    amplitude=0.0,
+                    turnover_rate=0.0,
+                    pe_ratio=0.0,
+                    pb_ratio=0.0,
+                    total_market_cap=0.0,
+                    circulating_market_cap=0.0,
+                )
         except Exception as e:
             logger.warning("新浪单股实时行情获取失败: %s - %s", code, e)
             return None

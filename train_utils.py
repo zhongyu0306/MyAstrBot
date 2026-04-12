@@ -11,6 +11,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent
+from .shared_http_utils import get_shared_http_session
 
 
 OFFICIAL_12306_BASE_URL = "https://kyfw.12306.cn/otn"
@@ -617,39 +618,39 @@ async def _fetch_trains(api_url: str, departure: str, arrival: str, travel_date:
     referer = f"{base_url}/leftTicket/init?linktypeid=dc"
 
     try:
-        async with aiohttp.ClientSession(headers=DEFAULT_HEADERS) as session:
-            async with session.get(referer, timeout=DEFAULT_QUERY_TIMEOUT) as resp:
-                if resp.status != 200:
-                    logger.warning("12306 初始化页面状态码: %s", resp.status)
-                    return None
+        session = await get_shared_http_session("train", default_headers=DEFAULT_HEADERS)
+        async with session.get(referer, timeout=DEFAULT_QUERY_TIMEOUT) as resp:
+            if resp.status != 200:
+                logger.warning("12306 初始化页面状态码: %s", resp.status)
+                return None
 
-            station_codes = await _load_station_codes(session, base_url)
-            from_code = _pick_station_code(station_codes, departure, "出发地")
-            to_code = _pick_station_code(station_codes, arrival, "目的地")
+        station_codes = await _load_station_codes(session, base_url)
+        from_code = _pick_station_code(station_codes, departure, "出发地")
+        to_code = _pick_station_code(station_codes, arrival, "目的地")
 
-            query_url = f"{base_url}/leftTicket/queryG"
-            params = {
-                "leftTicketDTO.train_date": query_date,
-                "leftTicketDTO.from_station": from_code,
-                "leftTicketDTO.to_station": to_code,
-                "purpose_codes": "ADULT",
-            }
-            headers = {"Referer": referer, "X-Requested-With": "XMLHttpRequest"}
-            async with session.get(query_url, params=params, headers=headers, timeout=DEFAULT_QUERY_TIMEOUT) as resp:
-                if resp.status != 200:
-                    logger.warning("12306 余票查询状态码: %s", resp.status)
-                    return None
+        query_url = f"{base_url}/leftTicket/queryG"
+        params = {
+            "leftTicketDTO.train_date": query_date,
+            "leftTicketDTO.from_station": from_code,
+            "leftTicketDTO.to_station": to_code,
+            "purpose_codes": "ADULT",
+        }
+        headers = {"Referer": referer, "X-Requested-With": "XMLHttpRequest"}
+        async with session.get(query_url, params=params, headers=headers, timeout=DEFAULT_QUERY_TIMEOUT) as resp:
+            if resp.status != 200:
+                logger.warning("12306 余票查询状态码: %s", resp.status)
+                return None
 
-                raw_text = (await resp.text()).lstrip("\ufeff")
-                if raw_text.lstrip().startswith("<"):
-                    logger.warning("12306 余票查询返回了非 JSON 内容")
-                    return None
+            raw_text = (await resp.text()).lstrip("\ufeff")
+            if raw_text.lstrip().startswith("<"):
+                logger.warning("12306 余票查询返回了非 JSON 内容")
+                return None
 
-                data = json.loads(raw_text)
-                if not data.get("status"):
-                    logger.warning("12306 余票查询返回异常: %s", data.get("messages"))
-                    return None
-                return _normalize_12306_payload(data, departure, arrival, query_date, from_code, to_code)
+            data = json.loads(raw_text)
+            if not data.get("status"):
+                logger.warning("12306 余票查询返回异常: %s", data.get("messages"))
+                return None
+            return _normalize_12306_payload(data, departure, arrival, query_date, from_code, to_code)
     except asyncio.TimeoutError:
         logger.error("12306 火车票查询超时")
         return None

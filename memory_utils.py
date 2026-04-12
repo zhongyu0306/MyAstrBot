@@ -5,7 +5,6 @@ import re
 import sqlite3
 import threading
 import time
-from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
@@ -13,6 +12,7 @@ from typing import Any, Iterator
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.star import StarTools
+from .memory_state_store import get_shared_db_path, shared_conn
 
 
 DEFAULT_ADMIN_QQ_IDS: tuple[str, ...] = ()
@@ -67,7 +67,7 @@ class UserMemoryStore:
     def __init__(self) -> None:
         self._data_dir = Path(StarTools.get_data_dir("astrbot_all_char"))
         self._data_dir.mkdir(parents=True, exist_ok=True)
-        self._db_path = self._data_dir / self.DB_NAME
+        self._db_path = get_shared_db_path()
         self._legacy_json_path = self._data_dir / self.LEGACY_JSON_NAME
         self._observe_user_throttle_seconds = DEFAULT_OBSERVE_USER_THROTTLE_SECONDS
         self._observe_user_cache: dict[str, tuple[float, str]] = {}
@@ -83,15 +83,8 @@ class UserMemoryStore:
         self._init_db()
         self._maybe_migrate_from_json()
 
-    @contextmanager
     def _get_conn(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self._db_path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
-        try:
-            yield conn
-        finally:
-            conn.close()
+        return shared_conn()
 
     def _init_db(self) -> None:
         with self._get_conn() as conn:
@@ -1268,49 +1261,35 @@ class UserMemoryStore:
         )
         return "\n".join(lines)
 
-    def build_prompt_for_event(self, event: AstrMessageEvent) -> str:
-        """为当前对话用户构建注入给 LLM 的永久记忆提示"""
+    @staticmethod
+    def _build_identification_prompt(qq_id: str, platform_name: str, message: str) -> str:
+        return (
+            "【用户识别信息】\n"
+            f"- 当前对话用户 QQ: {qq_id}\n"
+            f"- 当前平台昵称: {platform_name}\n"
+            f"{message}"
+        )
 
-        qq_id = self._safe_sender_id(event)
-        if not qq_id:
-            return ""
-
-        entry = self.get_memory(qq_id)
-        sender_name = self._safe_sender_name(event)
-        if not entry:
-            if not sender_name:
-                return ""
-            return (
-                "【用户识别信息】\n"
-                f"- 当前对话用户 QQ: {qq_id}\n"
-                f"- 当前平台昵称: {sender_name}\n"
-                "说明：这是你当前正在对话的用户信息，但暂未设置管理员录入的永久记忆"
-            )
-
-        memory_aliases = entry.get("memory_aliases") or []
-        scoped_alias = self._pick_scene_alias_for_event(entry, event)
-        scoped_aliases = entry.get("scoped_aliases") or []
-        platform_name = entry.get("platform_name") or sender_name
-        note = entry.get("note") or ""
-        seen_names = entry.get("seen_names") or []
-
-        if not memory_aliases and not note and not scoped_aliases:
-            if not platform_name:
-                return ""
-            return (
-                "【用户识别信息】\n"
-                f"- 当前对话用户 QQ: {qq_id}\n"
-                f"- 当前平台昵称: {platform_name}\n"
-                "说明：这是你当前正在对话的用户信息，系统已自动识别 QQ 与平台昵称，但管理员尚未录入长期人物记忆"
-            )
-
+    def _build_persistent_memory_lines(
+        self,
+        *,
+        qq_id: str,
+        platform_name: str,
+        memory_aliases: list[str],
+        scoped_alias: dict[str, Any] | None,
+        scoped_aliases: list[dict[str, Any]],
+        note: str,
+        seen_names: list[str],
+    ) -> list[str]:
         lines = [
             "【当前用户永久记忆】",
             f"- 当前对话用户 QQ: {qq_id}",
             f"- 当前平台昵称: {platform_name or '未知'}",
         ]
         if scoped_alias:
-            lines.append(f"- 当前场景称呼: {scoped_alias.get('alias') or '未设置'}（{scoped_alias.get('scope_label') or '当前场景'}）")
+            lines.append(
+                f"- 当前场景称呼: {scoped_alias.get('alias') or '未设置'}（{scoped_alias.get('scope_label') or '当前场景'}）"
+            )
         lines.append(f"- 全局记忆别名: {'、'.join(memory_aliases) if memory_aliases else '未设置'}")
         if note:
             lines.append(f"- 备注: {note}")
@@ -1323,6 +1302,51 @@ class UserMemoryStore:
                 lines.append(f"- 其他场景别名: {scoped_text}")
         if seen_names:
             lines.append(f"- 历史平台昵称: {', '.join(seen_names[:5])}")
+        return lines
+
+    def build_prompt_for_event(self, event: AstrMessageEvent) -> str:
+        """为当前对话用户构建注入给 LLM 的永久记忆提示"""
+
+        qq_id = self._safe_sender_id(event)
+        if not qq_id:
+            return ""
+
+        entry = self.get_memory(qq_id)
+        sender_name = self._safe_sender_name(event)
+        if not entry:
+            if not sender_name:
+                return ""
+            return self._build_identification_prompt(
+                qq_id,
+                sender_name,
+                "说明：这是你当前正在对话的用户信息，但暂未设置管理员录入的永久记忆",
+            )
+
+        memory_aliases = entry.get("memory_aliases") or []
+        scoped_alias = self._pick_scene_alias_for_event(entry, event)
+        scoped_aliases = entry.get("scoped_aliases") or []
+        platform_name = sender_name or entry.get("platform_name") or ""
+        note = entry.get("note") or ""
+        seen_names = entry.get("seen_names") or []
+
+        if not memory_aliases and not note and not scoped_aliases:
+            if not platform_name:
+                return ""
+            return self._build_identification_prompt(
+                qq_id,
+                platform_name,
+                "说明：这是你当前正在对话的用户信息，系统已自动识别 QQ 与平台昵称，但管理员尚未录入长期人物记忆",
+            )
+
+        lines = self._build_persistent_memory_lines(
+            qq_id=qq_id,
+            platform_name=platform_name,
+            memory_aliases=memory_aliases,
+            scoped_alias=scoped_alias,
+            scoped_aliases=scoped_aliases,
+            note=note,
+            seen_names=seen_names,
+        )
         lines.extend(
             [
                 "使用规则：",

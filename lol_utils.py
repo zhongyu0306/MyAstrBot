@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ from .config_utils import ensure_flat_config
 from .memory_state_store import load_json_state, save_json_state
 from .memory_utils import init_user_memory_store
 from .passive_memory_utils import init_passive_memory_store, record_passive_habit
+from .shared_http_utils import get_shared_http_session
 
 
 _SUBSCRIPTION_FILE_NAME = "lol_match_subscriptions.json"
@@ -744,37 +746,36 @@ async def _query_tencent_recent_lines(
     match_count: int,
     timeout_seconds: int,
 ) -> tuple[bool, dict[str, Any] | str]:
-    timeout = aiohttp.ClientTimeout(total=timeout_seconds)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        await _ensure_champion_name_cache(session)
+    session = await get_shared_http_session("lol_tencent", total_timeout_seconds=timeout_seconds)
+    await _ensure_champion_name_cache(session)
 
-        search_ok, search_data = await _search_tencent_players(
-            session,
-            base_url=base_url,
-            cookie=cookie,
-            nickname=nickname,
-        )
-        if not search_ok:
-            return False, str(search_data)
-        players = search_data if isinstance(search_data, list) else []
-        picked, pick_message = _pick_tencent_player(players, area)
-        if not picked:
-            return False, pick_message or f"未在 {_format_area_name(area)} 找到昵称“{nickname}”。"
+    search_ok, search_data = await _search_tencent_players(
+        session,
+        base_url=base_url,
+        cookie=cookie,
+        nickname=nickname,
+    )
+    if not search_ok:
+        return False, str(search_data)
+    players = search_data if isinstance(search_data, list) else []
+    picked, pick_message = _pick_tencent_player(players, area)
+    if not picked:
+        return False, pick_message or f"未在 {_format_area_name(area)} 找到昵称“{nickname}”。"
 
-        openid = str(picked.get("openid") or "").strip()
-        picked_nickname = str(picked.get("nickname") or nickname).strip() or nickname
-        list_ok, list_data = await _fetch_tencent_battle_list(
-            session,
-            base_url=base_url,
-            cookie=cookie,
-            area=area,
-            openid=openid,
-            account_type=account_type,
-            count=match_count,
-            offset=0,
-        )
-        if not list_ok:
-            return False, str(list_data)
+    openid = str(picked.get("openid") or "").strip()
+    picked_nickname = str(picked.get("nickname") or nickname).strip() or nickname
+    list_ok, list_data = await _fetch_tencent_battle_list(
+        session,
+        base_url=base_url,
+        cookie=cookie,
+        area=area,
+        openid=openid,
+        account_type=account_type,
+        count=match_count,
+        offset=0,
+    )
+    if not list_ok:
+        return False, str(list_data)
 
     battles = list_data if isinstance(list_data, list) else []
     normalized_battles = [item for item in (_normalize_tencent_battle(battle) for battle in battles) if item]
@@ -899,6 +900,284 @@ def _resolve_query_profile(
         "remembered_profile": remembered,
         "explicit_area": explicit_area,
     }
+
+
+@dataclass(frozen=True)
+class _LolCommandRuntime:
+    cfg: AstrBotConfig
+    cookie: str
+    default_area: int
+    default_count: int
+    timeout_seconds: int
+    account_type: int
+    base_url: str
+
+
+def _build_lol_command_runtime(config: AstrBotConfig) -> _LolCommandRuntime:
+    cfg = ensure_flat_config(config)
+    return _LolCommandRuntime(
+        cfg=cfg,
+        cookie=str(_get_cfg(cfg, "lol_tencent_cookie", "") or "").strip(),
+        default_area=_safe_int(_get_cfg(cfg, "lol_tencent_default_area", _DEFAULT_TENCENT_AREA), _DEFAULT_TENCENT_AREA, 1, 999),
+        default_count=_safe_int(_get_cfg(cfg, "lol_query_match_count", _DEFAULT_FETCH_COUNT), _DEFAULT_FETCH_COUNT, 1, 10),
+        timeout_seconds=_safe_int(_get_cfg(cfg, "lol_api_timeout_seconds", _DEFAULT_TIMEOUT_SECONDS), _DEFAULT_TIMEOUT_SECONDS, 5, 60),
+        account_type=_safe_int(
+            _get_cfg(cfg, "lol_tencent_account_type", _DEFAULT_TENCENT_ACCOUNT_TYPE),
+            _DEFAULT_TENCENT_ACCOUNT_TYPE,
+            1,
+            5,
+        ),
+        base_url=str(_get_cfg(cfg, "lol_tencent_base_url", _DEFAULT_TENCENT_BASE_URL) or _DEFAULT_TENCENT_BASE_URL).strip(),
+    )
+
+
+def _parse_lol_command_message(event: AstrMessageEvent, default_area: int) -> tuple[str, str, str]:
+    raw = str(event.get_message_str() or "").strip()
+    matched = re.match(r"^[\/!！]?(?:lol|LOL|英雄联盟|联盟战绩)(?:\s+(.+))?$", raw)
+    body = (matched.group(1) or "").strip() if matched else ""
+    if not body:
+        return "", "", _build_help_text(default_area)
+    parts = body.split(maxsplit=1)
+    action = str(parts[0] if parts else "").strip().lower()
+    extra = str(parts[1] if len(parts) > 1 else "").strip()
+    return body, action, extra
+
+
+def _normalize_lol_action(action: str) -> str:
+    action_text = str(action or "").strip().lower()
+    if action_text in {"help", "帮助", "h"}:
+        return "help"
+    if action_text in {"绑定", "bind", "记住"}:
+        return "bind"
+    if action_text in {"订阅", "subscribe", "sub"}:
+        return "subscribe"
+    if action_text in {"订阅列表", "列表", "list", "ls"}:
+        return "list"
+    if action_text in {"退订", "取消", "取消订阅", "unsubscribe", "unsub"}:
+        return "unsubscribe"
+    if action_text in {"分析", "analyze", "analyse"}:
+        return "analyze"
+    if action_text in {"查询", "查", "query", "q", "战绩"}:
+        return "query"
+    return ""
+
+
+async def _handle_lol_bind_action(
+    event: AstrMessageEvent,
+    runtime: _LolCommandRuntime,
+    extra: str,
+) -> str:
+    if not runtime.cookie:
+        return "未配置 `lol_tencent_cookie`，无法校验并绑定腾讯服账号。"
+    query_spec = _resolve_query_profile(
+        event,
+        raw_text=extra,
+        default_area=runtime.default_area,
+        default_count=1,
+    )
+    if not query_spec.get("ok"):
+        return str(query_spec.get("error") or "绑定参数错误。")
+    ok, payload = await _query_tencent_recent_lines(
+        cookie=runtime.cookie,
+        base_url=runtime.base_url,
+        area=int(query_spec["area"]),
+        nickname=str(query_spec["nickname"]),
+        account_type=runtime.account_type,
+        match_count=1,
+        timeout_seconds=runtime.timeout_seconds,
+    )
+    if not ok:
+        return str(payload)
+    result = dict(payload) if isinstance(payload, dict) else {}
+    _remember_lol_profile(event, str(result.get("nickname") or query_spec["nickname"]), int(result.get("area") or query_spec["area"]))
+    text = (
+        f"已记住你的 LoL 默认账号：{result.get('nickname') or query_spec['nickname']} "
+        f"（{result.get('area_name') or _format_area_name(int(query_spec['area']))}）\n"
+        "后续可以直接说 `/lol 战绩`、`/lol 分析`，或在群里直接 `/lol 订阅`。"
+    )
+    if result.get("pick_message"):
+        text += f"\n提示：{result['pick_message']}"
+    return text
+
+
+async def _handle_lol_subscribe_action(
+    event: AstrMessageEvent,
+    runtime: _LolCommandRuntime,
+    extra: str,
+) -> str:
+    if _safe_is_private_chat(event):
+        return "LoL 战绩订阅仅支持群聊使用。请在目标 QQ 群里发送该命令。"
+    group_id = _safe_group_id(event)
+    session_id = _safe_session_id(event)
+    if not group_id or not session_id:
+        return "无法识别当前群会话，订阅失败。"
+    if not runtime.cookie:
+        return "未配置 `lol_tencent_cookie`，无法查询腾讯服战绩。"
+
+    query_spec = _resolve_query_profile(
+        event,
+        raw_text=extra,
+        default_area=runtime.default_area,
+        default_count=runtime.default_count,
+    )
+    if not query_spec.get("ok"):
+        return str(query_spec.get("error") or "订阅参数错误。")
+
+    ok, payload = await _query_tencent_recent_lines(
+        cookie=runtime.cookie,
+        base_url=runtime.base_url,
+        area=int(query_spec["area"]),
+        nickname=str(query_spec["nickname"]),
+        account_type=runtime.account_type,
+        match_count=int(query_spec["count"]),
+        timeout_seconds=runtime.timeout_seconds,
+    )
+    if not ok:
+        return str(payload)
+
+    result = dict(payload) if isinstance(payload, dict) else {}
+    openid = str(result.get("openid") or "").strip()
+    display_name = str(result.get("nickname") or query_spec["nickname"]).strip() or str(query_spec["nickname"])
+    if not openid:
+        return "未能解析到该账号的 openid，订阅失败。"
+
+    _remember_lol_profile(event, display_name, int(result.get("area") or query_spec["area"]))
+    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    creator_id = _safe_sender_id(event)
+    creator_name = _safe_sender_name(event)
+    sub_id = f"{group_id}|tencent|{int(result.get('area') or query_spec['area'])}|{openid}"
+    preview = result.get("lines") or []
+    preview_text = preview[0] if preview else "暂无最近战绩。"
+
+    async with _SUBSCRIPTION_LOCK:
+        subscriptions = _load_subscriptions()
+        updated = False
+        for item in subscriptions:
+            if str(item.get("id") or "") != sub_id:
+                continue
+            item.update(
+                {
+                    "id": sub_id,
+                    "mode": "tencent",
+                    "session_id": session_id,
+                    "group_id": group_id,
+                    "openid": openid,
+                    "area": int(result.get("area") or query_spec["area"]),
+                    "nickname": display_name,
+                    "display_name": display_name,
+                    "account_type": runtime.account_type,
+                    "updated_at": now_text,
+                    "created_by": creator_id,
+                    "created_by_name": creator_name,
+                    "last_match_id": str((result.get("battles") or [{}])[0].get("game_id") or item.get("last_match_id") or "").strip(),
+                }
+            )
+            updated = True
+            break
+        if not updated:
+            subscriptions.append(
+                {
+                    "id": sub_id,
+                    "mode": "tencent",
+                    "session_id": session_id,
+                    "group_id": group_id,
+                    "openid": openid,
+                    "area": int(result.get("area") or query_spec["area"]),
+                    "nickname": display_name,
+                    "display_name": display_name,
+                    "account_type": runtime.account_type,
+                    "created_by": creator_id,
+                    "created_by_name": creator_name,
+                    "created_at": now_text,
+                    "updated_at": now_text,
+                    "last_match_id": str((result.get("battles") or [{}])[0].get("game_id") or "").strip(),
+                    "last_push_at": "",
+                    "last_check_at": "",
+                }
+            )
+        _save_subscriptions(subscriptions)
+
+    action_text = "已更新" if updated else "已新增"
+    message = (
+        f"{action_text} LoL 群战绩订阅：{display_name}（{result.get('area_name') or _format_area_name(int(query_spec['area']))}）\n"
+        "系统将每小时自动检查并在该群推送新战绩。\n"
+        f"当前最近一场：\n{preview_text}"
+    )
+    if result.get("pick_message"):
+        message += f"\n提示：{result['pick_message']}"
+    return message
+
+
+def _handle_lol_subscription_list_action(event: AstrMessageEvent) -> str:
+    group_id = _safe_group_id(event)
+    if not group_id:
+        return "LoL 订阅列表只能在群聊中查看。"
+    group_subs = [item for item in _load_subscriptions() if str(item.get("group_id") or "").strip() == group_id]
+    return _format_sub_list(group_subs)
+
+
+async def _handle_lol_unsubscribe_action(event: AstrMessageEvent, extra: str) -> str:
+    group_id = _safe_group_id(event)
+    if not group_id:
+        return "LoL 退订只能在群聊中使用。"
+    group_subs = [item for item in _load_subscriptions() if str(item.get("group_id") or "").strip() == group_id]
+    if not group_subs:
+        return "当前群没有 LoL 战绩订阅。"
+    target = extra.strip()
+    if not target:
+        return "用法：/lol 退订 <序号> 或 /lol 退订 全部"
+
+    async with _SUBSCRIPTION_LOCK:
+        all_subs = _load_subscriptions()
+        if target in {"全部", "all", "ALL"}:
+            kept = [item for item in all_subs if str(item.get("group_id") or "").strip() != group_id]
+            _save_subscriptions(kept)
+            return "退订成功。"
+
+        if not re.fullmatch(r"\d+", target):
+            return "用法：/lol 退订 <序号> 或 /lol 退订 全部"
+
+        idx = int(target)
+        if idx <= 0 or idx > len(group_subs):
+            return f"序号超出范围，请输入 1 到 {len(group_subs)}。"
+
+        removed_id = str(group_subs[idx - 1].get("id") or "").strip()
+        kept = [item for item in all_subs if str(item.get("id") or "").strip() != removed_id]
+        _save_subscriptions(kept)
+    return "退订成功。"
+
+
+async def _handle_lol_analyze_action(
+    event: AstrMessageEvent,
+    context: Context,
+    runtime: _LolCommandRuntime,
+    extra: str,
+) -> str:
+    return await query_lol_for_event(
+        event,
+        context,
+        runtime.cfg,
+        analyze=True,
+        raw_text=extra,
+    )
+
+
+async def _handle_lol_query_action(
+    event: AstrMessageEvent,
+    context: Context,
+    runtime: _LolCommandRuntime,
+    *,
+    action: str,
+    extra: str,
+    body: str,
+) -> str:
+    return await query_lol_for_event(
+        event,
+        context,
+        runtime.cfg,
+        analyze=False,
+        raw_text=extra if action in {"查询", "查", "query", "q", "战绩"} else body,
+    )
 
 
 def _compose_query_text(result: dict[str, Any], *, analysis_text: str = "") -> str:
@@ -1270,48 +1549,47 @@ class _LolSubscriptionCenter:
         if not subscriptions:
             return
 
-        timeout = aiohttp.ClientTimeout(total=timeout_seconds)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            await _ensure_champion_name_cache(session)
-            dirty = False
-            for sub in subscriptions:
-                try:
-                    changed, push_text = await self._check_single_subscription_tencent(
-                        session,
-                        sub=sub,
-                        cookie=cookie,
-                        base_url=base_url,
-                        account_type=account_type,
-                        query_count=max(query_count, push_limit + 1),
-                        push_limit=push_limit,
-                    )
-                    if changed:
-                        dirty = True
-                    if not push_text:
-                        continue
+        session = await get_shared_http_session("lol_tencent", total_timeout_seconds=timeout_seconds)
+        await _ensure_champion_name_cache(session)
+        dirty = False
+        for sub in subscriptions:
+            try:
+                changed, push_text = await self._check_single_subscription_tencent(
+                    session,
+                    sub=sub,
+                    cookie=cookie,
+                    base_url=base_url,
+                    account_type=account_type,
+                    query_count=max(query_count, push_limit + 1),
+                    push_limit=push_limit,
+                )
+                if changed:
+                    dirty = True
+                if not push_text:
+                    continue
 
-                    ok, err = await _send_group_text(
-                        self.context,
-                        session_id=str(sub.get("session_id") or ""),
-                        group_id=str(sub.get("group_id") or ""),
-                        text=push_text,
+                ok, err = await _send_group_text(
+                    self.context,
+                    session_id=str(sub.get("session_id") or ""),
+                    group_id=str(sub.get("group_id") or ""),
+                    text=push_text,
+                )
+                if ok:
+                    sub["last_push_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    dirty = True
+                else:
+                    label = str(sub.get("display_name") or sub.get("nickname") or "").strip()
+                    logger.warning(
+                        "LoL 战绩订阅推送失败 group_id=%s target=%s err=%s",
+                        str(sub.get("group_id") or ""),
+                        label,
+                        err,
                     )
-                    if ok:
-                        sub["last_push_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        dirty = True
-                    else:
-                        label = str(sub.get("display_name") or sub.get("nickname") or "").strip()
-                        logger.warning(
-                            "LoL 战绩订阅推送失败 group_id=%s target=%s err=%s",
-                            str(sub.get("group_id") or ""),
-                            label,
-                            err,
-                        )
-                    await asyncio.sleep(0.2)
-                except Exception as exc:
-                    logger.error("LoL 战绩订阅检查失败: %s", exc)
-            if dirty:
-                _save_subscriptions(subscriptions)
+                await asyncio.sleep(0.2)
+            except Exception as exc:
+                logger.error("LoL 战绩订阅检查失败: %s", exc)
+        if dirty:
+            _save_subscriptions(subscriptions)
 
     async def _check_single_subscription_tencent(
         self,
@@ -1410,245 +1688,41 @@ def init_lol_subscription_center(
 
 
 async def handle_lol_command(event: AstrMessageEvent, context: Context, config: AstrBotConfig):
-    cfg = ensure_flat_config(config)
-    init_lol_subscription_center(context, cfg)
+    runtime = _build_lol_command_runtime(config)
+    init_lol_subscription_center(context, runtime.cfg)
 
-    cookie = str(_get_cfg(cfg, "lol_tencent_cookie", "") or "").strip()
-    default_area = _safe_int(_get_cfg(cfg, "lol_tencent_default_area", _DEFAULT_TENCENT_AREA), _DEFAULT_TENCENT_AREA, 1, 999)
-    default_count = _safe_int(_get_cfg(cfg, "lol_query_match_count", _DEFAULT_FETCH_COUNT), _DEFAULT_FETCH_COUNT, 1, 10)
-    timeout_seconds = _safe_int(_get_cfg(cfg, "lol_api_timeout_seconds", _DEFAULT_TIMEOUT_SECONDS), _DEFAULT_TIMEOUT_SECONDS, 5, 60)
-    account_type = _safe_int(
-        _get_cfg(cfg, "lol_tencent_account_type", _DEFAULT_TENCENT_ACCOUNT_TYPE),
-        _DEFAULT_TENCENT_ACCOUNT_TYPE,
-        1,
-        5,
-    )
-    base_url = str(_get_cfg(cfg, "lol_tencent_base_url", _DEFAULT_TENCENT_BASE_URL) or _DEFAULT_TENCENT_BASE_URL).strip()
-
-    raw = str(event.get_message_str() or "").strip()
-    matched = re.match(r"^[\/!！]?(?:lol|LOL|英雄联盟|联盟战绩)(?:\s+(.+))?$", raw)
-    body = (matched.group(1) or "").strip() if matched else ""
+    body, action, extra = _parse_lol_command_message(event, runtime.default_area)
     if not body:
-        yield event.plain_result(_build_help_text(default_area))
+        yield event.plain_result(extra)
         return
 
-    parts = body.split(maxsplit=1)
-    action = str(parts[0] if parts else "").strip().lower()
-    extra = str(parts[1] if len(parts) > 1 else "").strip()
-
-    if action in {"help", "帮助", "h"}:
-        yield event.plain_result(_build_help_text(default_area))
+    normalized_action = _normalize_lol_action(action)
+    if normalized_action == "help":
+        yield event.plain_result(_build_help_text(runtime.default_area))
+        return
+    if normalized_action == "bind":
+        yield event.plain_result(await _handle_lol_bind_action(event, runtime, extra))
+        return
+    if normalized_action == "subscribe":
+        yield event.plain_result(await _handle_lol_subscribe_action(event, runtime, extra))
+        return
+    if normalized_action == "list":
+        yield event.plain_result(_handle_lol_subscription_list_action(event))
+        return
+    if normalized_action == "unsubscribe":
+        yield event.plain_result(await _handle_lol_unsubscribe_action(event, extra))
+        return
+    if normalized_action == "analyze":
+        yield event.plain_result(await _handle_lol_analyze_action(event, context, runtime, extra))
         return
 
-    if action in {"绑定", "bind", "记住"}:
-        if not cookie:
-            yield event.plain_result("未配置 `lol_tencent_cookie`，无法校验并绑定腾讯服账号。")
-            return
-        query_spec = _resolve_query_profile(
-            event,
-            raw_text=extra,
-            default_area=default_area,
-            default_count=1,
-        )
-        if not query_spec.get("ok"):
-            yield event.plain_result(str(query_spec.get("error") or "绑定参数错误。"))
-            return
-        ok, payload = await _query_tencent_recent_lines(
-            cookie=cookie,
-            base_url=base_url,
-            area=int(query_spec["area"]),
-            nickname=str(query_spec["nickname"]),
-            account_type=account_type,
-            match_count=1,
-            timeout_seconds=timeout_seconds,
-        )
-        if not ok:
-            yield event.plain_result(str(payload))
-            return
-        result = dict(payload) if isinstance(payload, dict) else {}
-        _remember_lol_profile(event, str(result.get("nickname") or query_spec["nickname"]), int(result.get("area") or query_spec["area"]))
-        text = (
-            f"已记住你的 LoL 默认账号：{result.get('nickname') or query_spec['nickname']} "
-            f"（{result.get('area_name') or _format_area_name(int(query_spec['area']))}）\n"
-            "后续可以直接说 `/lol 战绩`、`/lol 分析`，或在群里直接 `/lol 订阅`。"
-        )
-        if result.get("pick_message"):
-            text += f"\n提示：{result['pick_message']}"
-        yield event.plain_result(text)
-        return
-
-    if action in {"订阅", "subscribe", "sub"}:
-        if _safe_is_private_chat(event):
-            yield event.plain_result("LoL 战绩订阅仅支持群聊使用。请在目标 QQ 群里发送该命令。")
-            return
-        group_id = _safe_group_id(event)
-        session_id = _safe_session_id(event)
-        if not group_id or not session_id:
-            yield event.plain_result("无法识别当前群会话，订阅失败。")
-            return
-        if not cookie:
-            yield event.plain_result("未配置 `lol_tencent_cookie`，无法查询腾讯服战绩。")
-            return
-
-        query_spec = _resolve_query_profile(
-            event,
-            raw_text=extra,
-            default_area=default_area,
-            default_count=default_count,
-        )
-        if not query_spec.get("ok"):
-            yield event.plain_result(str(query_spec.get("error") or "订阅参数错误。"))
-            return
-
-        ok, payload = await _query_tencent_recent_lines(
-            cookie=cookie,
-            base_url=base_url,
-            area=int(query_spec["area"]),
-            nickname=str(query_spec["nickname"]),
-            account_type=account_type,
-            match_count=int(query_spec["count"]),
-            timeout_seconds=timeout_seconds,
-        )
-        if not ok:
-            yield event.plain_result(str(payload))
-            return
-
-        result = dict(payload) if isinstance(payload, dict) else {}
-        openid = str(result.get("openid") or "").strip()
-        display_name = str(result.get("nickname") or query_spec["nickname"]).strip() or str(query_spec["nickname"])
-        if not openid:
-            yield event.plain_result("未能解析到该账号的 openid，订阅失败。")
-            return
-
-        _remember_lol_profile(event, display_name, int(result.get("area") or query_spec["area"]))
-        now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        creator_id = _safe_sender_id(event)
-        creator_name = _safe_sender_name(event)
-        sub_id = f"{group_id}|tencent|{int(result.get('area') or query_spec['area'])}|{openid}"
-        preview = result.get("lines") or []
-        preview_text = preview[0] if preview else "暂无最近战绩。"
-
-        async with _SUBSCRIPTION_LOCK:
-            subscriptions = _load_subscriptions()
-            updated = False
-            for item in subscriptions:
-                if str(item.get("id") or "") != sub_id:
-                    continue
-                item.update(
-                    {
-                        "id": sub_id,
-                        "mode": "tencent",
-                        "session_id": session_id,
-                        "group_id": group_id,
-                        "openid": openid,
-                        "area": int(result.get("area") or query_spec["area"]),
-                        "nickname": display_name,
-                        "display_name": display_name,
-                        "account_type": account_type,
-                        "updated_at": now_text,
-                        "created_by": creator_id,
-                        "created_by_name": creator_name,
-                        "last_match_id": str((result.get("battles") or [{}])[0].get("game_id") or item.get("last_match_id") or "").strip(),
-                    }
-                )
-                updated = True
-                break
-            if not updated:
-                subscriptions.append(
-                    {
-                        "id": sub_id,
-                        "mode": "tencent",
-                        "session_id": session_id,
-                        "group_id": group_id,
-                        "openid": openid,
-                        "area": int(result.get("area") or query_spec["area"]),
-                        "nickname": display_name,
-                        "display_name": display_name,
-                        "account_type": account_type,
-                        "created_by": creator_id,
-                        "created_by_name": creator_name,
-                        "created_at": now_text,
-                        "updated_at": now_text,
-                        "last_match_id": str((result.get("battles") or [{}])[0].get("game_id") or "").strip(),
-                        "last_push_at": "",
-                        "last_check_at": "",
-                    }
-                )
-            _save_subscriptions(subscriptions)
-
-        action_text = "已更新" if updated else "已新增"
-        message = (
-            f"{action_text} LoL 群战绩订阅：{display_name}（{result.get('area_name') or _format_area_name(int(query_spec['area']))}）\n"
-            "系统将每小时自动检查并在该群推送新战绩。\n"
-            f"当前最近一场：\n{preview_text}"
-        )
-        if result.get("pick_message"):
-            message += f"\n提示：{result['pick_message']}"
-        yield event.plain_result(message)
-        return
-
-    if action in {"订阅列表", "列表", "list", "ls"}:
-        group_id = _safe_group_id(event)
-        if not group_id:
-            yield event.plain_result("LoL 订阅列表只能在群聊中查看。")
-            return
-        group_subs = [item for item in _load_subscriptions() if str(item.get("group_id") or "").strip() == group_id]
-        yield event.plain_result(_format_sub_list(group_subs))
-        return
-
-    if action in {"退订", "取消", "取消订阅", "unsubscribe", "unsub"}:
-        group_id = _safe_group_id(event)
-        if not group_id:
-            yield event.plain_result("LoL 退订只能在群聊中使用。")
-            return
-        group_subs = [item for item in _load_subscriptions() if str(item.get("group_id") or "").strip() == group_id]
-        if not group_subs:
-            yield event.plain_result("当前群没有 LoL 战绩订阅。")
-            return
-        target = extra.strip()
-        if not target:
-            yield event.plain_result("用法：/lol 退订 <序号> 或 /lol 退订 全部")
-            return
-
-        async with _SUBSCRIPTION_LOCK:
-            all_subs = _load_subscriptions()
-            if target in {"全部", "all", "ALL"}:
-                kept = [item for item in all_subs if str(item.get("group_id") or "").strip() != group_id]
-                _save_subscriptions(kept)
-                yield event.plain_result("退订成功。")
-                return
-
-            if not re.fullmatch(r"\d+", target):
-                yield event.plain_result("用法：/lol 退订 <序号> 或 /lol 退订 全部")
-                return
-
-            idx = int(target)
-            if idx <= 0 or idx > len(group_subs):
-                yield event.plain_result(f"序号超出范围，请输入 1 到 {len(group_subs)}。")
-                return
-
-            removed_id = str(group_subs[idx - 1].get("id") or "").strip()
-            kept = [item for item in all_subs if str(item.get("id") or "").strip() != removed_id]
-            _save_subscriptions(kept)
-        yield event.plain_result("退订成功。")
-        return
-
-    if action in {"分析", "analyze", "analyse"}:
-        result_text = await query_lol_for_event(
+    yield event.plain_result(
+        await _handle_lol_query_action(
             event,
             context,
-            cfg,
-            analyze=True,
-            raw_text=extra,
+            runtime,
+            action=action,
+            extra=extra,
+            body=body,
         )
-        yield event.plain_result(result_text)
-        return
-
-    result_text = await query_lol_for_event(
-        event,
-        context,
-        cfg,
-        analyze=False,
-        raw_text=extra if action in {"查询", "查", "query", "q", "战绩"} else body,
     )
-    yield event.plain_result(result_text)

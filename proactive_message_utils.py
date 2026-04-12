@@ -15,6 +15,7 @@ from astrbot.api.star import Context, StarTools
 
 from .memory_state_store import load_json_state, save_json_state
 from .memory_utils import get_memory_admin_qq_ids
+from .proactive_auto_chat_utils import format_configured_proactive_targets_text
 
 
 _TARGETS_FILE_NAME = "proactive_message_targets.json"
@@ -384,9 +385,21 @@ async def send_message_to_target(
     )
 
 
-def _format_targets_text(records: list[dict[str, Any]], scene_type: str = "") -> str:
+def _format_targets_text(
+    records: list[dict[str, Any]],
+    scene_type: str = "",
+    *,
+    config: AstrBotConfig | dict | None = None,
+) -> str:
+    configured_text = format_configured_proactive_targets_text(config, scene_type=scene_type)
     if not records:
         label = _scene_label(scene_type) if scene_type else "全部"
+        if configured_text:
+            return (
+                f"当前没有已绑定的{label}主动消息目标。\n"
+                "你现在配置的是“按 QQ 号 / 群号自动主动聊天”，不是这里的“命令绑定别名”模式。\n\n"
+                f"{configured_text}"
+            )
         return f"当前没有已绑定的{label}主动消息目标。"
 
     title = "已绑定的主动消息目标："
@@ -405,6 +418,10 @@ def _format_targets_text(records: list[dict[str, Any]], scene_type: str = "") ->
             f" | 已发送 {send_count} 次"
             f" | 最近发送：{last_sent_at}"
         )
+    if configured_text:
+        lines.append("")
+        lines.append("另外，你当前还配置了按 QQ 号 / 群号自动主动聊天：")
+        lines.append(configured_text)
     return "\n".join(lines)
 
 
@@ -425,7 +442,8 @@ def _help_text() -> str:
         "   `/主动消息 删除 群 工作群`\n"
         "   `/主动消息 删除 私聊 老王私聊`\n"
         "说明：\n"
-        "- 命令绑定属于兼容模式；现在更推荐直接使用配置里的 QQ 列表、群号列表和时段规则。\n"
+        "- 命令绑定属于兼容模式；现在更推荐直接使用配置里的 QQ 列表、群号列表和自动主动聊天规则。\n"
+        "- `/主动消息 列表` 会优先显示命令绑定别名；如果你配置的是 QQ 号 / 群号自动主动聊天，也会在列表里一起展示。\n"
         "- 同一个别名可以分别绑定一条群聊目标和一条私聊目标。\n"
         "- 当前功能仅允许管理员使用。"
     )
@@ -436,8 +454,6 @@ async def handle_proactive_message_command(
     context: Context,
     config: AstrBotConfig | None = None,
 ):
-    del config
-
     if not _is_admin_event(event):
         yield event.plain_result(_build_admin_denied_text())
         return
@@ -461,7 +477,7 @@ async def handle_proactive_message_command(
         if scene_type == SCOPE_BOTH:
             scene_type = ""
         records = await list_targets(scene_type=scene_type)
-        yield event.plain_result(_format_targets_text(records, scene_type=scene_type))
+        yield event.plain_result(_format_targets_text(records, scene_type=scene_type, config=config))
         return
 
     if body.startswith("删除"):

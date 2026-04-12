@@ -104,9 +104,8 @@ def load_json_state(
     normalizer: StateNormalizer | None = None,
     legacy_path: Path | None = None,
 ) -> Any:
-    _ensure_db()
     normalized_key = _normalize_state_key(state_key)
-    with _get_conn() as conn:
+    with shared_conn() as conn:
         row = conn.execute(
             f"SELECT payload FROM {_TABLE_NAME} WHERE namespace = ? AND state_key = ?",
             (namespace, normalized_key),
@@ -136,10 +135,9 @@ def load_json_state(
 
 
 def save_json_state(namespace: str, payload: Any, *, state_key: str = "") -> None:
-    _ensure_db()
     normalized_key = _normalize_state_key(state_key)
     encoded = json.dumps(payload, ensure_ascii=False)
-    with _get_conn() as conn:
+    with shared_conn() as conn:
         conn.execute(
             f"""
             INSERT INTO {_TABLE_NAME}(namespace, state_key, payload, updated_at)
@@ -153,9 +151,8 @@ def save_json_state(namespace: str, payload: Any, *, state_key: str = "") -> Non
 
 
 def delete_json_state(namespace: str, *, state_key: str = "") -> None:
-    _ensure_db()
     normalized_key = _normalize_state_key(state_key)
-    with _get_conn() as conn:
+    with shared_conn() as conn:
         conn.execute(
             f"DELETE FROM {_TABLE_NAME} WHERE namespace = ? AND state_key = ?",
             (namespace, normalized_key),

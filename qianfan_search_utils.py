@@ -17,6 +17,7 @@ import aiohttp
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.star import Context, StarTools
 from .memory_state_store import load_json_state, save_json_state
+from .shared_http_utils import get_shared_http_session
 
 # 本地每日上限（达到后不再调用接口）
 DAILY_LIMIT_SMART = 100
@@ -265,24 +266,24 @@ async def _call_smart_search(api_key: str, query: str) -> str | None:
         "model": "ernie-4.5-turbo-32k",
     }
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                CHAT_COMPLETIONS_URL,
-                json=body,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=60),
-            ) as resp:
-                if resp.status != 200:
-                    text = await resp.text()
-                    logger.warning("千帆智能搜索 API 非 200: %s %s", resp.status, text[:300])
-                    return None
-                data = await resp.json()
-                choices = (data or {}).get("choices") or []
-                if not choices:
-                    return None
-                msg = choices[0].get("message") or {}
-                content = msg.get("content") or ""
-                return content.strip() or None
+        session = await get_shared_http_session("qianfan_search")
+        async with session.post(
+            CHAT_COMPLETIONS_URL,
+            json=body,
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=60),
+        ) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                logger.warning("千帆智能搜索 API 非 200: %s %s", resp.status, text[:300])
+                return None
+            data = await resp.json()
+            choices = (data or {}).get("choices") or []
+            if not choices:
+                return None
+            msg = choices[0].get("message") or {}
+            content = msg.get("content") or ""
+            return content.strip() or None
     except Exception as e:
         logger.exception("千帆智能搜索请求异常: %s", e)
         return None
@@ -331,55 +332,55 @@ async def _call_web_search(api_key: str, query: str) -> str | None:
         "search_recency_filter": "year",
     }
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                WEB_SEARCH_URL,
-                json=body,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as resp:
-                if resp.status != 200:
-                    text = await resp.text()
-                    logger.warning("千帆网页搜索 API 非 200: %s %s", resp.status, text[:300])
-                    return None
-                data = await resp.json()
-                # 千帆可能返回：1) 仅原始结果列表  2) 结果列表 + 现成 AI 总结(answer/content)
-                # 只把「原始搜索结果列表」交给 LLM，不把 API 自带的总结当材料，保证最终回复来自用户自己的 LLM
-                results_list = _extract_web_search_results_list(data)
-                if results_list is not None:
-                    parts = []
-                    for i, item in enumerate(results_list[:20], 1):
-                        if isinstance(item, str):
-                            parts.append(f"{i}. {item}")
-                        elif isinstance(item, dict):
-                            title = item.get("title") or item.get("name") or ""
-                            snippet = item.get("snippet") or item.get("content") or item.get("body") or ""
-                            url = item.get("url") or item.get("link") or ""
-                            line = f"{i}. {title}\n   {snippet}".strip()
-                            if url:
-                                line += f"\n   链接: {url}"
-                            parts.append(line)
-                        else:
-                            parts.append(f"{i}. {json.dumps(item, ensure_ascii=False)[:500]}")
-                    return "\n\n".join(parts) if parts else None
-                # 无结果列表时：若 API 返回了现成总结(answer/content)，仍交给 LLM 并注明来源，避免直接丢结果
-                if isinstance(data, dict):
-                    logger.info(
-                        "千帆网页搜索响应无可解析的 results 列表，顶层 keys: %s（请据此调整 _extract_web_search_results_list）",
-                        list(data.keys()),
-                    )
-                    for key in ("answer", "content", "summary", "message", "text"):
-                        text = data.get(key)
-                        if isinstance(text, str) and text.strip():
-                            return f"[千帆搜索直接返回的总结，请整理后回复]\n\n{text.strip()}"
-                    # 嵌套：data.content / result.answer 等
-                    for outer in ("data", "result", "body"):
-                        obj = data.get(outer)
-                        if isinstance(obj, dict):
-                            for k in ("answer", "content", "summary", "message", "text"):
-                                t = obj.get(k)
-                                if isinstance(t, str) and t.strip():
-                                    return f"[千帆搜索直接返回的总结，请整理后回复]\n\n{t.strip()}"
+        session = await get_shared_http_session("qianfan_search")
+        async with session.post(
+            WEB_SEARCH_URL,
+            json=body,
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=30),
+        ) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                logger.warning("千帆网页搜索 API 非 200: %s %s", resp.status, text[:300])
+                return None
+            data = await resp.json()
+            # 千帆可能返回：1) 仅原始结果列表  2) 结果列表 + 现成 AI 总结(answer/content)
+            # 只把「原始搜索结果列表」交给 LLM，不把 API 自带的总结当材料，保证最终回复来自用户自己的 LLM
+            results_list = _extract_web_search_results_list(data)
+            if results_list is not None:
+                parts = []
+                for i, item in enumerate(results_list[:20], 1):
+                    if isinstance(item, str):
+                        parts.append(f"{i}. {item}")
+                    elif isinstance(item, dict):
+                        title = item.get("title") or item.get("name") or ""
+                        snippet = item.get("snippet") or item.get("content") or item.get("body") or ""
+                        url = item.get("url") or item.get("link") or ""
+                        line = f"{i}. {title}\n   {snippet}".strip()
+                        if url:
+                            line += f"\n   链接: {url}"
+                        parts.append(line)
+                    else:
+                        parts.append(f"{i}. {json.dumps(item, ensure_ascii=False)[:500]}")
+                return "\n\n".join(parts) if parts else None
+            # 无结果列表时：若 API 返回了现成总结(answer/content)，仍交给 LLM 并注明来源，避免直接丢结果
+            if isinstance(data, dict):
+                logger.info(
+                    "千帆网页搜索响应无可解析的 results 列表，顶层 keys: %s（请据此调整 _extract_web_search_results_list）",
+                    list(data.keys()),
+                )
+                for key in ("answer", "content", "summary", "message", "text"):
+                    text = data.get(key)
+                    if isinstance(text, str) and text.strip():
+                        return f"[千帆搜索直接返回的总结，请整理后回复]\n\n{text.strip()}"
+                # 嵌套：data.content / result.answer 等
+                for outer in ("data", "result", "body"):
+                    obj = data.get(outer)
+                    if isinstance(obj, dict):
+                        for k in ("answer", "content", "summary", "message", "text"):
+                            t = obj.get(k)
+                            if isinstance(t, str) and t.strip():
+                                return f"[千帆搜索直接返回的总结，请整理后回复]\n\n{t.strip()}"
                 return None
     except Exception as e:
         logger.exception("千帆网页搜索请求异常: %s", e)

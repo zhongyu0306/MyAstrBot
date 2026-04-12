@@ -8,6 +8,7 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent
 
 from .ocr_utils import _extract_image_from_event
+from .shared_http_utils import get_shared_http_session
 
 
 ANIMETRACE_DEFAULT_URL = "https://api.animetrace.com/v1/search"
@@ -55,16 +56,16 @@ async def _prepare_file_field(image_src: str) -> tuple[str, bytes] | None:
 
     # 远程 URL
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(s, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                if resp.status != 200:
-                    logger.warning("[animetrace] 下载远程图片失败，HTTP %s", resp.status)
-                    return None
-                data = await resp.read()
-                if not data:
-                    return None
-                filename = s.rsplit("/", 1)[-1] or "image.jpg"
-                return filename, data
+        session = await get_shared_http_session("animetrace")
+        async with session.get(s, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+            if resp.status != 200:
+                logger.warning("[animetrace] 下载远程图片失败，HTTP %s", resp.status)
+                return None
+            data = await resp.read()
+            if not data:
+                return None
+            filename = s.rsplit("/", 1)[-1] or "image.jpg"
+            return filename, data
     except Exception as e:
         logger.warning("[animetrace] 下载远程图片异常: %s", e)
         return None
@@ -87,23 +88,23 @@ async def _call_animetrace(api_url: str, payload: dict[str, Any], file_field: tu
         form.add_field(k, str(v))
 
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                post_url,
-                data=form,
-                timeout=aiohttp.ClientTimeout(total=60),
-            ) as resp:
-                text = await resp.text()
-                if resp.status != 200:
-                    logger.warning("[animetrace] 接口返回非 200：status=%s, body=%s", resp.status, text[:500])
-                    return None
-                try:
-                    data = await resp.json()
-                except Exception:
-                    # 某些情况下服务器可能返回非 JSON 文本
-                    logger.warning("[animetrace] 解析 JSON 失败，返回原始文本")
-                    return {"raw_text": text}
-                return data  # type: ignore[return-value]
+        session = await get_shared_http_session("animetrace")
+        async with session.post(
+            post_url,
+            data=form,
+            timeout=aiohttp.ClientTimeout(total=60),
+        ) as resp:
+            text = await resp.text()
+            if resp.status != 200:
+                logger.warning("[animetrace] 接口返回非 200：status=%s, body=%s", resp.status, text[:500])
+                return None
+            try:
+                data = await resp.json()
+            except Exception:
+                # 某些情况下服务器可能返回非 JSON 文本
+                logger.warning("[animetrace] 解析 JSON 失败，返回原始文本")
+                return {"raw_text": text}
+            return data  # type: ignore[return-value]
     except Exception as e:
         logger.warning("[animetrace] 接口请求异常: %s", e)
         return None
@@ -252,4 +253,3 @@ async def handle_animetrace_command(event: AstrMessageEvent, config: AstrBotConf
     if len(text) > max_len:
         text = text[:max_len] + "\n\n（结果过长，已截断显示。）"
     yield event.plain_result(text)
-
