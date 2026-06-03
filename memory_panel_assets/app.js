@@ -75,9 +75,11 @@ const $$ = (selector) => Array.from(document.querySelectorAll(selector));
 async function api(path, options = {}) {
   const headers = {
     "Content-Type": "application/json",
-    "X-Memory-Token": state.token,
     ...(options.headers || {}),
   };
+  if (state.token) {
+    headers["X-Memory-Token"] = state.token;
+  }
   const response = await fetch(path, { ...options, headers });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -771,11 +773,6 @@ function bindForms() {
 }
 
 async function bootstrap() {
-  if (!state.token) {
-    $("#empty-state").classList.remove("hidden");
-    $("#empty-state").innerHTML = "<div><p class='eyebrow'>访问受限</p><h2>当前链接缺少访问令牌</h2><p>请重新使用 bot 返回的完整面板链接打开。</p></div>";
-    return;
-  }
   fillStaticSelects();
   bindForms();
   await refreshDirectoryUsers();

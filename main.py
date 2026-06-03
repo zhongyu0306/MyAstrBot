@@ -48,6 +48,7 @@ from .bookkeeping_utils import (
     handle_bookkeeping_delete,
 )
 from .jrys_utils import handle_jrys_command, handle_jrys_last_command
+from .fun_utils import handle_daily_persona_command, handle_draw_lot_command, handle_eat_what_command
 from .ocr_utils import handle_ocr_command, _extract_image_from_event
 from .anime_utils import (
     handle_animetrace_command,
@@ -68,6 +69,21 @@ from .qianfan_search_utils import (
     handle_web_search_command,
 )
 from .config_utils import ensure_flat_config
+from .conversation_intelligence_utils import (
+    build_conversation_context_prompt,
+    handle_conversation_context_command,
+    init_conversation_intelligence_store,
+    observe_conversation_incoming_event,
+    observe_conversation_outgoing_reply,
+)
+from .reflection_task_utils import (
+    build_reflection_task_prompt,
+    handle_task_thread_command,
+    init_reflection_task_store,
+    observe_reflection_task_incoming_event,
+    observe_reflection_task_outgoing_reply,
+    run_reflection_task_sleep_maintenance,
+)
 from .music_utils import (
     handle_music_command,
     handle_music_number_selection,
@@ -198,12 +214,14 @@ def _trim_prompt_part_to_budget(text: str, budget_chars: int) -> str:
 
 def _compose_memory_prompt_with_budget(named_parts: list[tuple[str, str]], max_chars: int) -> tuple[str, list[str], int]:
     part_caps = {
-        "memory_prompt": 700,
-        "passive_profile_prompt": 450,
-        "slang_prompt": 260,
-        "event_recall_prompt": 320,
-        "related_prompt": 320,
+        "memory_prompt": 760,
+        "passive_profile_prompt": 520,
+        "related_prompt": 360,
+        "event_recall_prompt": 380,
         "reminiscence_prompt": 520,
+        "conversation_context_prompt": 520,
+        "reflection_task_prompt": 480,
+        "slang_prompt": 220,
     }
     used = 0
     included_names: list[str] = []
@@ -314,6 +332,7 @@ class AllCharPlugin(Star):
         self.context = context
         self.config = ensure_flat_config(config)
         self._background_tasks: set[asyncio.Task[Any]] = set()
+        self._cognition_sleep_loop_task: asyncio.Task[Any] | None = None
         AllCharPlugin._shared_config = self.config
         logger.info("astrbot_all_char 插件初始化完成（命令 + LLM 工具模式）")
         self._initialize_runtime_components()
@@ -340,8 +359,11 @@ class AllCharPlugin(Star):
             getattr(self.config, "memory_related_memory_cache_ttl_seconds", 60)
         )
         init_passive_memory_store()
+        init_conversation_intelligence_store()
+        init_reflection_task_store()
         init_slang_store()
         maybe_autostart_memory_panel(self.context, self.config)
+        self._start_cognition_sleep_loop_if_needed()
 
     def _register_function_tools(self) -> None:
         try:
@@ -412,6 +434,58 @@ class AllCharPlugin(Star):
             reminiscence_enabled,
         )
 
+    def _get_cognition_sleep_runtime(self) -> tuple[bool, int]:
+        cognition_enabled = bool(getattr(self.config, "cognition_enabled", True))
+        cognition_sleep_enabled = bool(getattr(self.config, "cognition_sleep_enabled", True))
+        interval_seconds = _to_int_in_range(
+            getattr(self.config, "cognition_sleep_interval_seconds", 21600),
+            default=21600,
+            minimum=300,
+            maximum=86400,
+        )
+        return cognition_enabled and cognition_sleep_enabled, interval_seconds
+
+    def _start_cognition_sleep_loop_if_needed(self) -> None:
+        if self._cognition_sleep_loop_task is not None and not self._cognition_sleep_loop_task.done():
+            return
+        enabled, _interval_seconds = self._get_cognition_sleep_runtime()
+        if not enabled:
+            return
+        coro = self._run_cognition_sleep_maintenance_loop()
+        try:
+            self._cognition_sleep_loop_task = self._schedule_background_coro(
+                "cognition.sleep_maintenance_loop",
+                coro,
+            )
+        except RuntimeError as exc:
+            coro.close()
+            logger.debug("[astrbot_all_char] cognition sleep loop not started yet: %s", exc)
+
+    async def _run_cognition_sleep_maintenance_loop(self) -> None:
+        await asyncio.sleep(30)
+        while True:
+            enabled, interval_seconds = self._get_cognition_sleep_runtime()
+            try:
+                if enabled:
+                    stats = await asyncio.to_thread(run_reflection_task_sleep_maintenance, self.config)
+                    if any(int(value or 0) > 0 for value in stats.values()):
+                        logger.info(
+                            (
+                                "[astrbot_all_char] cognition sleep maintenance: stale=%s merged=%s "
+                                "archived=%s reflections_pruned=%s threads_pruned=%s"
+                            ),
+                            stats.get("stale_marked", 0),
+                            stats.get("merged", 0),
+                            stats.get("archived", 0),
+                            stats.get("reflections_pruned", 0),
+                            stats.get("threads_pruned", 0),
+                        )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("[astrbot_all_char] cognition sleep maintenance failed: %s", exc)
+            await asyncio.sleep(interval_seconds if enabled else 300)
+
     def _schedule_memory_learning_tasks(self, event: AstrMessageEvent, passive_store: Any) -> None:
         self._schedule_background_call("passive_memory.observe_message", passive_store.observe_message, event)
         self._schedule_background_coro(
@@ -432,6 +506,14 @@ class AllCharPlugin(Star):
         prompt_jobs: list[tuple[str, Awaitable[str]]] = [
             ("memory_prompt", asyncio.to_thread(store.build_prompt_for_event, event)),
             ("passive_profile_prompt", asyncio.to_thread(passive_store.build_profile_prompt, event)),
+            (
+                "conversation_context_prompt",
+                asyncio.to_thread(build_conversation_context_prompt, event, message_text, self.config),
+            ),
+            (
+                "reflection_task_prompt",
+                asyncio.to_thread(build_reflection_task_prompt, event, message_text, self.config),
+            ),
             ("slang_prompt", asyncio.to_thread(build_slang_prompt_for_event, event, message_text, self.config)),
             (
                 "related_prompt",
@@ -462,14 +544,57 @@ class AllCharPlugin(Star):
 
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE)
     async def observe_proactive_private_message(self, event: AstrMessageEvent):
+        self._start_cognition_sleep_loop_if_needed()
+        observe_conversation_incoming_event(event, self.config)
+        observe_reflection_task_incoming_event(event, self.config)
         await observe_proactive_incoming_event(event, self.context, self.config)
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def observe_proactive_group_message(self, event: AstrMessageEvent):
+        self._start_cognition_sleep_loop_if_needed()
+        observe_conversation_incoming_event(event, self.config)
+        observe_reflection_task_incoming_event(event, self.config)
         await observe_proactive_incoming_event(event, self.context, self.config)
+
+    @filter.on_llm_response()
+    async def capture_chat_llm_response(self, event: AstrMessageEvent, response: Any):
+        if not bool(getattr(event, "_allchar_conversation_request_active", False)):
+            return
+        reply_text = str(getattr(response, "completion_text", "") or "").strip()
+        if not reply_text:
+            return
+        try:
+            setattr(event, "_allchar_last_llm_response", reply_text)
+        except Exception:
+            pass
+        try:
+            event.set_extra("allchar_last_llm_response", reply_text)
+        except Exception:
+            pass
 
     @filter.after_message_sent()
     async def observe_proactive_after_message_sent(self, event: AstrMessageEvent):
+        reply_text = ""
+        try:
+            reply_text = str(getattr(event, "_allchar_last_llm_response", "") or "").strip()
+        except Exception:
+            reply_text = ""
+        if not reply_text:
+            try:
+                reply_text = str(event.get_extra("allchar_last_llm_response") or "").strip()
+            except Exception:
+                reply_text = ""
+        if reply_text:
+            observe_conversation_outgoing_reply(event, reply_text, self.config)
+            observe_reflection_task_outgoing_reply(event, reply_text, self.config)
+            try:
+                setattr(event, "_allchar_last_llm_response", "")
+            except Exception:
+                pass
+            try:
+                event.set_extra("allchar_last_llm_response", "")
+            except Exception:
+                pass
         await observe_proactive_sent_event(event, self.context, self.config)
 
     def _track_background_task(self, task: asyncio.Task[Any], label: str) -> None:
@@ -493,12 +618,13 @@ class AllCharPlugin(Star):
 
         task.add_done_callback(_on_done)
 
-    def _schedule_background_coro(self, label: str, coro: Awaitable[Any]) -> None:
+    def _schedule_background_coro(self, label: str, coro: Awaitable[Any]) -> asyncio.Task[Any]:
         task = asyncio.create_task(coro)
         self._track_background_task(task, label)
+        return task
 
-    def _schedule_background_call(self, label: str, func: Any, *args: Any) -> None:
-        self._schedule_background_coro(label, asyncio.to_thread(func, *args))
+    def _schedule_background_call(self, label: str, func: Any, *args: Any) -> asyncio.Task[Any]:
+        return self._schedule_background_coro(label, asyncio.to_thread(func, *args))
 
     async def _cancel_background_tasks(self) -> None:
         open_tasks = list(self._background_tasks)
@@ -593,6 +719,16 @@ class AllCharPlugin(Star):
     @filter.command("记忆面板", alias={"memory_panel", "记忆管理"})
     async def cmd_memory_panel(self, event: AstrMessageEvent):
         async for result in self._forward_results(handle_memory_panel_command(event, self.context, self.config)):
+            yield result
+
+    @filter.command("会话上下文", alias={"聊天上下文", "对话上下文", "会话状态"})
+    async def cmd_conversation_context(self, event: AstrMessageEvent):
+        async for result in self._forward_results(handle_conversation_context_command(event, self.config)):
+            yield result
+
+    @filter.command("任务线程", alias={"线程"})
+    async def cmd_task_thread(self, event: AstrMessageEvent):
+        async for result in self._forward_results(handle_task_thread_command(event, self.config)):
             yield result
 
     @filter.command("黑话", alias={"黑话词典", "群黑话"})
@@ -725,6 +861,23 @@ class AllCharPlugin(Star):
         async for result in self._forward_results(handle_jrys_last_command(event, self.context, self.config)):
             yield result
 
+    # ---------------- 趣味玩法 ----------------
+
+    @filter.command("今日人设", alias={"人设", "今日设定", "今天我是"})
+    async def cmd_daily_persona(self, event: AstrMessageEvent):
+        async for result in self._forward_results(handle_daily_persona_command(event)):
+            yield result
+
+    @filter.command("吃什么", alias={"今天吃什么", "吃啥", "午饭吃什么", "晚饭吃什么", "夜宵吃什么"})
+    async def cmd_eat_what(self, event: AstrMessageEvent):
+        async for result in self._forward_results(handle_eat_what_command(event)):
+            yield result
+
+    @filter.command("抽签", alias={"求签", "摇签"})
+    async def cmd_draw_lot(self, event: AstrMessageEvent):
+        async for result in self._forward_results(handle_draw_lot_command(event)):
+            yield result
+
     # ---------------- 百度千帆智能搜索 / 网页搜索 ----------------
 
     @filter.command("智能搜索", alias={"智能搜素"})
@@ -804,6 +957,7 @@ class AllCharPlugin(Star):
         """
         在普通聊天进入大模型前注入当前 QQ 的永久记忆。
         """
+        self._start_cognition_sleep_loop_if_needed()
         store = init_user_memory_store()
         passive_store = init_passive_memory_store()
         qq_id = store._safe_sender_id(event)
@@ -831,6 +985,8 @@ class AllCharPlugin(Star):
         prompt_parts = await _gather_named_prompt_parts(prompt_jobs)
         memory_prompt = prompt_parts.get("memory_prompt", "")
         passive_profile_prompt = prompt_parts.get("passive_profile_prompt", "")
+        conversation_context_prompt = prompt_parts.get("conversation_context_prompt", "")
+        reflection_task_prompt = prompt_parts.get("reflection_task_prompt", "")
         slang_prompt = prompt_parts.get("slang_prompt", "")
         event_recall_prompt = prompt_parts.get("event_recall_prompt", "") if event_recall_enabled else ""
         related_prompt = prompt_parts.get("related_prompt", "")
@@ -852,10 +1008,12 @@ class AllCharPlugin(Star):
         named_parts = [
             ("memory_prompt", memory_prompt),
             ("passive_profile_prompt", passive_profile_prompt),
-            ("slang_prompt", slang_prompt),
-            ("event_recall_prompt", event_recall_prompt),
             ("related_prompt", related_prompt),
+            ("event_recall_prompt", event_recall_prompt),
             ("reminiscence_prompt", reminiscence_prompt),
+            ("conversation_context_prompt", conversation_context_prompt),
+            ("reflection_task_prompt", reflection_task_prompt),
+            ("slang_prompt", slang_prompt),
         ]
         extra_prompt, included_parts, used_chars = _compose_memory_prompt_with_budget(
             named_parts,
@@ -868,6 +1026,10 @@ class AllCharPlugin(Star):
             )
             return
 
+        try:
+            setattr(event, "_allchar_conversation_request_active", True)
+        except Exception:
+            pass
         base_prompt = getattr(req, "system_prompt", "") or ""
         req.system_prompt = self._join_system_prompt(base_prompt, extra_prompt)
         logger.info(

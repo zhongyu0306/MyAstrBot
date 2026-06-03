@@ -9,7 +9,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
@@ -45,6 +45,7 @@ class MemoryPanelManager:
         self.host = str(getattr(config, "memory_panel_host", "0.0.0.0") or "0.0.0.0").strip()
         self.port = int(getattr(config, "memory_panel_port", 7835) or 7835)
         self.enabled = bool(getattr(config, "memory_panel_enabled", True))
+        self.require_token = bool(getattr(config, "memory_panel_require_token", False))
         self.public_base_url = str(getattr(config, "memory_panel_public_base_url", "") or "").strip()
         self.assets_dir = Path(__file__).with_name("memory_panel_assets")
         self.token = secrets.token_urlsafe(18)
@@ -58,6 +59,7 @@ class MemoryPanelManager:
         self.context = context
         self.config = config
         self.enabled = bool(getattr(config, "memory_panel_enabled", True))
+        self.require_token = bool(getattr(config, "memory_panel_require_token", False))
         self.host = str(getattr(config, "memory_panel_host", self.host) or self.host).strip()
         self.port = int(getattr(config, "memory_panel_port", self.port) or self.port)
         self.public_base_url = str(getattr(config, "memory_panel_public_base_url", self.public_base_url) or "").strip()
@@ -79,7 +81,9 @@ class MemoryPanelManager:
         else:
             display_host = "127.0.0.1" if self.host in {"0.0.0.0", "::"} else self.host
             base = f"http://{display_host}:{current_port}/"
-        return f"{base}?token={self.token}" if with_token else base
+        if self.require_token and with_token:
+            return f"{base}?token={self.token}"
+        return base
 
     def _is_port_available(self, port: int) -> bool:
         try:
@@ -128,6 +132,11 @@ class MemoryPanelManager:
             self._thread = threading.Thread(target=self._server.serve_forever, daemon=True, name="astrbot_memory_panel")
             self._thread.start()
             logger.info("[memory_panel] started at %s", self.panel_url(with_token=False))
+            if not self.require_token and self.host in {"0.0.0.0", "::"}:
+                logger.warning(
+                    "[memory_panel] token auth is disabled and host=%s; anyone who can reach the port can edit memory",
+                    self.host,
+                )
             return self.panel_url()
 
     def stop(self) -> bool:
@@ -151,6 +160,7 @@ class MemoryPanelManager:
         return {
             "enabled": self.enabled,
             "running": running,
+            "require_token": self.require_token,
             "url": self.panel_url() if running else self.panel_url(with_token=False),
         }
 
@@ -161,7 +171,10 @@ class MemoryPanelManager:
             pass
 
     def _read_asset(self, relative_path: str) -> bytes:
-        asset_path = self.assets_dir / relative_path
+        root = self.assets_dir.resolve()
+        asset_path = (self.assets_dir / relative_path).resolve()
+        if root != asset_path and root not in asset_path.parents:
+            raise FileNotFoundError(relative_path)
         return asset_path.read_bytes()
 
     def _parse_body(self, handler: BaseHTTPRequestHandler) -> dict[str, Any]:
@@ -309,9 +322,15 @@ class MemoryPanelManager:
         }
 
     def _check_token(self, handler: BaseHTTPRequestHandler, query: dict[str, list[str]]) -> bool:
+        if not self.require_token:
+            return True
         header_token = str(handler.headers.get("X-Memory-Token") or "").strip()
         query_token = str((query.get("token") or [""])[0]).strip()
-        return header_token == self.token or query_token == self.token
+        expected = self.token.encode("utf-8")
+        return any(
+            candidate and secrets.compare_digest(candidate.encode("utf-8"), expected)
+            for candidate in (header_token, query_token)
+        )
 
     def _json_response(self, handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -346,7 +365,7 @@ class MemoryPanelManager:
         if path == "/api/users":
             return 200, {"users": self._build_user_list(str((query.get("q") or [""])[0]))}
         if path.startswith("/api/users/"):
-            qq_id = path.removeprefix("/api/users/").strip("/")
+            qq_id = unquote(path.removeprefix("/api/users/").strip("/"))
             if "/" in qq_id:
                 return 404, {"error": "not_found"}
             return 200, self._build_user_detail(qq_id)
@@ -357,7 +376,7 @@ class MemoryPanelManager:
         passive_store = init_passive_memory_store()
 
         if method == "PUT" and path.startswith("/api/users/") and "/" not in path.removeprefix("/api/users/").strip("/"):
-            qq_id = path.removeprefix("/api/users/").strip("/")
+            qq_id = unquote(path.removeprefix("/api/users/").strip("/"))
             memory_store.update_user_profile(
                 qq_id,
                 note=payload.get("note"),
@@ -366,7 +385,7 @@ class MemoryPanelManager:
             return 200, self._build_user_detail(qq_id)
 
         if path.startswith("/api/users/") and path.endswith("/aliases"):
-            qq_id = path.removeprefix("/api/users/").removesuffix("/aliases").strip("/")
+            qq_id = unquote(path.removeprefix("/api/users/").removesuffix("/aliases").strip("/"))
             alias = str(payload.get("alias") or "").strip()
             scene_type = str(payload.get("scene_type") or "global").strip()
             scene_value = str(payload.get("scene_value") or "").strip()
@@ -403,7 +422,7 @@ class MemoryPanelManager:
             return 200, {"ok": deleted, "detail": self._build_user_detail(qq_id) if qq_id else None}
 
         if path.startswith("/api/users/") and path.endswith("/preferences") and method == "POST":
-            qq_id = path.removeprefix("/api/users/").removesuffix("/preferences").strip("/")
+            qq_id = unquote(path.removeprefix("/api/users/").removesuffix("/preferences").strip("/"))
             record = passive_store.save_preference(
                 qq_id,
                 str(payload.get("preference_type") or "like").strip(),
@@ -414,7 +433,7 @@ class MemoryPanelManager:
             return 200, {"record": record, "detail": self._build_user_detail(qq_id)}
 
         if path.startswith("/api/users/") and path.endswith("/relations") and method == "POST":
-            qq_id = path.removeprefix("/api/users/").removesuffix("/relations").strip("/")
+            qq_id = unquote(path.removeprefix("/api/users/").removesuffix("/relations").strip("/"))
             record = passive_store.save_relation(
                 qq_id,
                 str(payload.get("target_name") or "").strip(),
@@ -427,7 +446,7 @@ class MemoryPanelManager:
             return 200, {"record": record, "detail": self._build_user_detail(qq_id)}
 
         if path.startswith("/api/users/") and path.endswith("/habits") and method == "POST":
-            qq_id = path.removeprefix("/api/users/").removesuffix("/habits").strip("/")
+            qq_id = unquote(path.removeprefix("/api/users/").removesuffix("/habits").strip("/"))
             record = passive_store.save_habit(
                 qq_id,
                 str(payload.get("module_name") or "").strip(),
@@ -438,7 +457,7 @@ class MemoryPanelManager:
             return 200, {"record": record, "detail": self._build_user_detail(qq_id)}
 
         if path.startswith("/api/users/") and path.endswith("/events") and method == "POST":
-            qq_id = path.removeprefix("/api/users/").removesuffix("/events").strip("/")
+            qq_id = unquote(path.removeprefix("/api/users/").removesuffix("/events").strip("/"))
             record = passive_store.save_event(
                 qq_id,
                 str(payload.get("summary") or "").strip(),
@@ -449,7 +468,7 @@ class MemoryPanelManager:
             return 200, {"record": record, "detail": self._build_user_detail(qq_id)}
 
         if path.startswith("/api/users/") and path.endswith("/bookkeeping") and method == "POST":
-            qq_id = path.removeprefix("/api/users/").removesuffix("/bookkeeping").strip("/")
+            qq_id = unquote(path.removeprefix("/api/users/").removesuffix("/bookkeeping").strip("/"))
             record = create_bookkeeping_record_for_user(
                 qq_id,
                 record_type=str(payload.get("record_type") or "").strip(),
@@ -463,7 +482,7 @@ class MemoryPanelManager:
             return 200, {"record": record, "detail": self._build_user_detail(qq_id)}
 
         if path.startswith("/api/users/") and path.endswith("/simple-reminders") and method == "POST":
-            qq_id = path.removeprefix("/api/users/").removesuffix("/simple-reminders").strip("/")
+            qq_id = unquote(path.removeprefix("/api/users/").removesuffix("/simple-reminders").strip("/"))
             user_entry = memory_store.get_memory(qq_id) or {}
             record = create_simple_reminder_for_creator(
                 qq_id,
@@ -537,7 +556,7 @@ class MemoryPanelManager:
         if path.startswith("/api/users/") and "/bookkeeping/" in path:
             suffix = path.removeprefix("/api/users/")
             qq_id, _, record_id_text = suffix.partition("/bookkeeping/")
-            qq_id = qq_id.strip("/")
+            qq_id = unquote(qq_id.strip("/"))
             record_id = int(str(record_id_text or "").strip("/"))
             if method == "PUT":
                 record = update_bookkeeping_record_for_user(
@@ -557,7 +576,7 @@ class MemoryPanelManager:
         if path.startswith("/api/users/") and "/simple-reminders/" in path:
             suffix = path.removeprefix("/api/users/")
             qq_id, _, reminder_id = suffix.partition("/simple-reminders/")
-            qq_id = qq_id.strip("/")
+            qq_id = unquote(qq_id.strip("/"))
             cleaned_reminder_id = str(reminder_id or "").strip("/")
             if method == "PUT":
                 record = update_simple_reminder_for_creator(
@@ -594,10 +613,17 @@ class MemoryPanelManager:
                 if not manager._check_token(self, query):
                     manager._json_response(self, 403, {"error": "forbidden"})
                     return
-                if method == "GET":
-                    status, payload = manager._handle_api_get(path, query)
-                else:
-                    status, payload = manager._handle_api_write(method, path, manager._parse_body(self))
+                try:
+                    if method == "GET":
+                        status, payload = manager._handle_api_get(path, query)
+                    else:
+                        status, payload = manager._handle_api_write(method, path, manager._parse_body(self))
+                except ValueError as exc:
+                    logger.warning("[memory_panel] bad request path=%s err=%s", path, exc)
+                    status, payload = 400, {"error": "bad_request"}
+                except Exception as exc:
+                    logger.warning("[memory_panel] api failed path=%s err=%s", path, exc)
+                    status, payload = 500, {"error": "internal_error"}
                 manager._json_response(self, status, payload)
 
             def do_GET(self) -> None:
@@ -658,7 +684,8 @@ async def handle_memory_panel_command(event: AstrMessageEvent, context: Any, con
     if action in {"状态", "status"}:
         status = manager.status()
         text = "记忆面板运行中" if status["running"] else "记忆面板未启动"
-        yield event.plain_result(f"{text}\n{status['url']}")
+        token_text = "访问需要 token" if status.get("require_token") else "访问不需要 token"
+        yield event.plain_result(f"{text}（{token_text}）\n{status['url']}")
         return
 
     try:
@@ -670,5 +697,6 @@ async def handle_memory_panel_command(event: AstrMessageEvent, context: Any, con
     yield event.plain_result(
         "记忆面板已启动。\n"
         f"{url}\n"
+        f"{'访问链接已带临时 token。' if manager.require_token else '浏览器直开即可，不需要 token。'}\n"
         "这里可以查看和修改认人记忆、偏好记忆、关系图谱、跨模块习惯和事件回忆。"
     )

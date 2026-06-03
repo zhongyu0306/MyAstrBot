@@ -9,6 +9,8 @@ _MODULE_KEYS = (
     "lol",
     "fund",
     "weather",
+    "conversation",
+    "cognition",
     "memory",
     "slang",
     "proactive",

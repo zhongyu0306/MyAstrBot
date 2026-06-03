@@ -718,10 +718,16 @@
         "hint": "建议默认关闭，需要时再通过 `/记忆面板` 手动打开。",
         "default": false
       },
+      "memory_panel_require_token": {
+        "description": "记忆面板访问需要 token",
+        "type": "bool",
+        "hint": "默认关闭，浏览器直接打开面板地址即可访问；开启后 `/记忆面板` 会返回带临时 token 的链接。",
+        "default": false
+      },
       "memory_panel_host": {
         "description": "记忆面板监听地址",
         "type": "string",
-        "hint": "默认使用 0.0.0.0 允许外网访问；如果只想本机访问可改成 127.0.0.1。",
+        "hint": "默认使用 0.0.0.0 允许外网访问；面板默认不需要 token，如果只想本机访问可改成 127.0.0.1。",
         "default": "0.0.0.0"
       },
       "memory_panel_port": {
@@ -796,6 +802,171 @@
           "step": 50
         },
         "default": 1800
+      }
+    }
+  },
+  "conversation": {
+    "description": "聊天增强：会话总账与短期上下文",
+    "hint": "参考 AngelHeart / AngelMemory 的思路，为普通聊天维护短期会话记录、阶段目标、情绪和待跟进事项，并在对话前补充一段会话态势提示。",
+    "type": "object",
+    "items": {
+      "conversation_enabled": {
+        "description": "启用会话增强",
+        "type": "bool",
+        "hint": "关闭后不再维护会话总账，也不会在普通聊天前注入短期会话上下文。",
+        "default": true
+      },
+      "conversation_message_window": {
+        "description": "单次注入最近消息条数",
+        "type": "int",
+        "hint": "用于构建“最近对话纪要”的最近消息数量。数值越大，上下文越完整，但提示词也会更长。",
+        "slider": {
+          "min": 4,
+          "max": 20,
+          "step": 1
+        },
+        "default": 8
+      },
+      "conversation_prompt_max_chars": {
+        "description": "会话上下文最大字符预算",
+        "type": "int",
+        "hint": "用于限制 on_llm_request 追加的会话态势内容上限，避免系统提示词过长。",
+        "slider": {
+          "min": 200,
+          "max": 3000,
+          "step": 50
+        },
+        "default": 900
+      },
+      "conversation_message_retention_per_session": {
+        "description": "每个会话保留的消息数量",
+        "type": "int",
+        "hint": "会话总账中每个会话最多保留多少条消息，用于短期上下文构建。",
+        "slider": {
+          "min": 20,
+          "max": 300,
+          "step": 5
+        },
+        "default": 80
+      },
+      "conversation_insight_retention_days": {
+        "description": "短期会话记忆保留天数",
+        "type": "int",
+        "hint": "用户最近在忙什么、当前情绪、待办事项和 bot 自己承诺过什么，会在这个时间窗口内参与召回。",
+        "slider": {
+          "min": 1,
+          "max": 60,
+          "step": 1
+        },
+        "default": 14
+      },
+      "conversation_max_injected_insights": {
+        "description": "单次最多注入短期记忆条数",
+        "type": "int",
+        "hint": "控制“会话短期记忆”最多注入多少条，避免提示词过满。",
+        "slider": {
+          "min": 1,
+          "max": 8,
+          "step": 1
+        },
+        "default": 4
+      }
+    }
+  },
+  "cognition": {
+    "description": "认知增强：任务线程、事后反思与睡眠整理",
+    "hint": "让 bot 从普通聊天里提炼长期事项、记录上轮承接质量，并定期整理线程，让回复更会接住同一件事。",
+    "type": "object",
+    "items": {
+      "cognition_enabled": {
+        "description": "启用认知增强",
+        "type": "bool",
+        "hint": "关闭后不再维护任务线程、事后反思，也不会在普通聊天前注入认知提示。",
+        "default": true
+      },
+      "cognition_task_threads_enabled": {
+        "description": "启用任务线程提炼",
+        "type": "bool",
+        "hint": "开启后会从普通聊天中自动提炼“最近在推进的事项”，并支持用 `/任务线程` 查看和管理。",
+        "default": true
+      },
+      "cognition_posthoc_reflection_enabled": {
+        "description": "启用事后反思",
+        "type": "bool",
+        "hint": "开启后会在 bot 回复后总结用户更需要什么、情绪如何、你上轮承诺了什么，用于下一轮承接。",
+        "default": true
+      },
+      "cognition_sleep_enabled": {
+        "description": "启用睡眠整理",
+        "type": "bool",
+        "hint": "开启后会后台定期整理任务线程：标记久未活跃事项、合并相近线程、归档已完成事项并清理旧记录。",
+        "default": true
+      },
+      "cognition_sleep_interval_seconds": {
+        "description": "睡眠整理间隔（秒）",
+        "type": "int",
+        "hint": "后台每隔多久执行一次睡眠整理。数值越小整理越勤，但写库频率也会更高。",
+        "slider": {
+          "min": 300,
+          "max": 86400,
+          "step": 300
+        },
+        "default": 21600
+      },
+      "cognition_task_prompt_max_chars": {
+        "description": "认知提示最大字符预算",
+        "type": "int",
+        "hint": "限制注入到 system prompt 里的任务线程与事后反思内容上限，避免提示词过长。",
+        "slider": {
+          "min": 200,
+          "max": 2500,
+          "step": 50
+        },
+        "default": 700
+      },
+      "cognition_max_prompt_threads": {
+        "description": "单次最多注入任务线程数",
+        "type": "int",
+        "hint": "控制聊天前最多补充多少条值得延续的任务线程。",
+        "slider": {
+          "min": 1,
+          "max": 8,
+          "step": 1
+        },
+        "default": 4
+      },
+      "cognition_max_prompt_reflections": {
+        "description": "单次最多注入反思条数",
+        "type": "int",
+        "hint": "控制聊天前最多补充多少条最近互动的事后反思。",
+        "slider": {
+          "min": 1,
+          "max": 4,
+          "step": 1
+        },
+        "default": 2
+      },
+      "cognition_thread_stale_days": {
+        "description": "任务线程转为待确认的天数",
+        "type": "int",
+        "hint": "任务线程在这段时间内没有新进展时，会被睡眠整理标记为待确认，避免长期占满提示词预算。",
+        "slider": {
+          "min": 1,
+          "max": 90,
+          "step": 1
+        },
+        "default": 7
+      },
+      "cognition_thread_retention_days": {
+        "description": "认知记录保留天数",
+        "type": "int",
+        "hint": "睡眠整理会在这个时间窗口之外清理旧反思，以及长期不活跃的已完成 / 待确认线程。",
+        "slider": {
+          "min": 3,
+          "max": 180,
+          "step": 1
+        },
+        "default": 45
       }
     }
   },
